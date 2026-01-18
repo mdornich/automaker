@@ -535,20 +535,23 @@ check_ports() {
                     break
                     ;;
                 [uU]|[uU][sS][eE])
+                    # Collect both ports first
                     read -r -p "Enter web port (default $DEFAULT_WEB_PORT): " input_web
                     input_web=${input_web:-$DEFAULT_WEB_PORT}
+                    read -r -p "Enter server port (default $DEFAULT_SERVER_PORT): " input_server
+                    input_server=${input_server:-$DEFAULT_SERVER_PORT}
+
+                    # Validate both before assigning either
                     if ! validate_port "$input_web" "Web port"; then
                         continue
                     fi
-                    WEB_PORT=$input_web
-
-                    read -r -p "Enter server port (default $DEFAULT_SERVER_PORT): " input_server
-                    input_server=${input_server:-$DEFAULT_SERVER_PORT}
                     if ! validate_port "$input_server" "Server port"; then
                         continue
                     fi
-                    SERVER_PORT=$input_server
 
+                    # Assign atomically after both validated
+                    WEB_PORT=$input_web
+                    SERVER_PORT=$input_server
                     echo "${C_GREEN}Using ports: Web=$WEB_PORT, Server=$SERVER_PORT${RESET}"
                     break
                     ;;
@@ -836,22 +839,25 @@ resolve_port_conflicts() {
                 [uU]|[uU][sS][eE])
                     echo ""
                     local input_pad=$(( (TERM_COLS - 40) / 2 ))
+                    # Collect both ports first
                     printf "%${input_pad}s" ""
                     read -r -p "Enter web port (default $DEFAULT_WEB_PORT): " input_web
                     input_web=${input_web:-$DEFAULT_WEB_PORT}
-                    if ! validate_port "$input_web" "Web port"; then
-                        continue
-                    fi
-                    WEB_PORT=$input_web
-
                     printf "%${input_pad}s" ""
                     read -r -p "Enter server port (default $DEFAULT_SERVER_PORT): " input_server
                     input_server=${input_server:-$DEFAULT_SERVER_PORT}
+
+                    # Validate both before assigning either
+                    if ! validate_port "$input_web" "Web port"; then
+                        continue
+                    fi
                     if ! validate_port "$input_server" "Server port"; then
                         continue
                     fi
-                    SERVER_PORT=$input_server
 
+                    # Assign atomically after both validated
+                    WEB_PORT=$input_web
+                    SERVER_PORT=$input_server
                     center_print "Using ports: Web=$WEB_PORT, Server=$SERVER_PORT" "$C_GREEN"
                     break
                     ;;
