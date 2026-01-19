@@ -35,6 +35,7 @@ import { toast } from 'sonner';
 import { getBlockingDependencies } from '@automaker/dependency-resolver';
 import { BoardBackgroundModal } from '@/components/dialogs/board-background-modal';
 import { Spinner } from '@/components/ui/spinner';
+import { useShallow } from 'zustand/react/shallow';
 import { useAutoMode } from '@/hooks/use-auto-mode';
 import { useKeyboardShortcutsConfig } from '@/hooks/use-keyboard-shortcuts';
 import { useWindowState } from '@/hooks/use-window-state';
@@ -112,7 +113,31 @@ export function BoardView() {
     isPrimaryWorktreeBranch,
     getPrimaryWorktreeBranch,
     setPipelineConfig,
-  } = useAppStore();
+  } = useAppStore(
+    useShallow((state) => ({
+      currentProject: state.currentProject,
+      maxConcurrency: state.maxConcurrency,
+      setMaxConcurrency: state.setMaxConcurrency,
+      defaultSkipTests: state.defaultSkipTests,
+      specCreatingForProject: state.specCreatingForProject,
+      setSpecCreatingForProject: state.setSpecCreatingForProject,
+      pendingPlanApproval: state.pendingPlanApproval,
+      setPendingPlanApproval: state.setPendingPlanApproval,
+      updateFeature: state.updateFeature,
+      getCurrentWorktree: state.getCurrentWorktree,
+      setCurrentWorktree: state.setCurrentWorktree,
+      getWorktrees: state.getWorktrees,
+      setWorktrees: state.setWorktrees,
+      useWorktrees: state.useWorktrees,
+      enableDependencyBlocking: state.enableDependencyBlocking,
+      skipVerificationInAutoMode: state.skipVerificationInAutoMode,
+      planUseSelectedWorktreeBranch: state.planUseSelectedWorktreeBranch,
+      addFeatureUseSelectedWorktreeBranch: state.addFeatureUseSelectedWorktreeBranch,
+      isPrimaryWorktreeBranch: state.isPrimaryWorktreeBranch,
+      getPrimaryWorktreeBranch: state.getPrimaryWorktreeBranch,
+      setPipelineConfig: state.setPipelineConfig,
+    }))
+  );
   // Fetch pipeline config via React Query
   const { data: pipelineConfig } = usePipelineConfig(currentProject?.path);
   const queryClient = useQueryClient();

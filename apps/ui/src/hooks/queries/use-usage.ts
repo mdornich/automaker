@@ -13,6 +13,8 @@ import type { ClaudeUsage, CodexUsage } from '@/store/app-store';
 
 /** Polling interval for usage data (60 seconds) */
 const USAGE_POLLING_INTERVAL = 60 * 1000;
+const USAGE_REFETCH_ON_FOCUS = false;
+const USAGE_REFETCH_ON_RECONNECT = false;
 
 /**
  * Fetch Claude API usage data
@@ -42,6 +44,8 @@ export function useClaudeUsage(enabled = true) {
     refetchInterval: enabled ? USAGE_POLLING_INTERVAL : false,
     // Keep previous data while refetching
     placeholderData: (previousData) => previousData,
+    refetchOnWindowFocus: USAGE_REFETCH_ON_FOCUS,
+    refetchOnReconnect: USAGE_REFETCH_ON_RECONNECT,
   });
 }
 
@@ -73,5 +77,7 @@ export function useCodexUsage(enabled = true) {
     refetchInterval: enabled ? USAGE_POLLING_INTERVAL : false,
     // Keep previous data while refetching
     placeholderData: (previousData) => previousData,
+    refetchOnWindowFocus: USAGE_REFETCH_ON_FOCUS,
+    refetchOnReconnect: USAGE_REFETCH_ON_RECONNECT,
   });
 }

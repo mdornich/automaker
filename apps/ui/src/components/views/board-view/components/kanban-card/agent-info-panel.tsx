@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { memo, useEffect, useState, useMemo } from 'react';
 import { Feature, ThinkingLevel, ParsedTask } from '@/store/app-store';
 import type { ReasoningEffort } from '@automaker/types';
 import { getProviderFromModel } from '@/lib/utils';
@@ -56,7 +56,7 @@ interface AgentInfoPanelProps {
   isCurrentAutoTask?: boolean;
 }
 
-export function AgentInfoPanel({
+export const AgentInfoPanel = memo(function AgentInfoPanel({
   feature,
   projectPath,
   contextContent,
@@ -405,4 +405,4 @@ export function AgentInfoPanel({
       onOpenChange={setIsSummaryDialogOpen}
     />
   );
-}
+});

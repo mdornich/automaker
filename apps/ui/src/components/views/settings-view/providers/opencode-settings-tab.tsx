@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { useAppStore } from '@/store/app-store';
 import { OpencodeCliStatus, OpencodeCliStatusSkeleton } from '../cli-status/opencode-cli-status';
 import { OpencodeModelConfiguration } from './opencode-model-configuration';
+import { ProviderToggle } from './provider-toggle';
 import { useOpencodeCliStatus, useOpencodeProviders, useOpencodeModels } from '@/hooks/queries';
 import { queryKeys } from '@/lib/query-keys';
 import type { CliStatus as SharedCliStatus } from '../shared/types';

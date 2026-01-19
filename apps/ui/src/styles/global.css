@@ -1120,3 +1120,8 @@
     animation: none;
   }
 }
+
+.perf-contain {
+  contain: layout paint;
+  content-visibility: auto;
+}

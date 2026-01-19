@@ -9,6 +9,9 @@ import { getElectronAPI } from '@/lib/electron';
 import { queryKeys } from '@/lib/query-keys';
 import { STALE_TIMES } from '@/lib/query-client';
 
+const WORKTREE_REFETCH_ON_FOCUS = false;
+const WORKTREE_REFETCH_ON_RECONNECT = false;
+
 interface WorktreeInfo {
   path: string;
   branch: string;
@@ -59,6 +62,8 @@ export function useWorktrees(projectPath: string | undefined, includeDetails = t
     },
     enabled: !!projectPath,
     staleTime: STALE_TIMES.WORKTREES,
+    refetchOnWindowFocus: WORKTREE_REFETCH_ON_FOCUS,
+    refetchOnReconnect: WORKTREE_REFETCH_ON_RECONNECT,
   });
 }
 
@@ -83,6 +88,8 @@ export function useWorktreeInfo(projectPath: string | undefined, featureId: stri
     },
     enabled: !!projectPath && !!featureId,
     staleTime: STALE_TIMES.WORKTREES,
+    refetchOnWindowFocus: WORKTREE_REFETCH_ON_FOCUS,
+    refetchOnReconnect: WORKTREE_REFETCH_ON_RECONNECT,
   });
 }
 
@@ -107,6 +114,8 @@ export function useWorktreeStatus(projectPath: string | undefined, featureId: st
     },
     enabled: !!projectPath && !!featureId,
     staleTime: STALE_TIMES.WORKTREES,
+    refetchOnWindowFocus: WORKTREE_REFETCH_ON_FOCUS,
+    refetchOnReconnect: WORKTREE_REFETCH_ON_RECONNECT,
   });
 }
 
@@ -134,6 +143,8 @@ export function useWorktreeDiffs(projectPath: string | undefined, featureId: str
     },
     enabled: !!projectPath && !!featureId,
     staleTime: STALE_TIMES.WORKTREES,
+    refetchOnWindowFocus: WORKTREE_REFETCH_ON_FOCUS,
+    refetchOnReconnect: WORKTREE_REFETCH_ON_RECONNECT,
   });
 }
 
@@ -203,6 +214,8 @@ export function useWorktreeBranches(worktreePath: string | undefined, includeRem
     },
     enabled: !!worktreePath,
     staleTime: STALE_TIMES.WORKTREES,
+    refetchOnWindowFocus: WORKTREE_REFETCH_ON_FOCUS,
+    refetchOnReconnect: WORKTREE_REFETCH_ON_RECONNECT,
   });
 }
 
@@ -229,6 +242,8 @@ export function useWorktreeInitScript(projectPath: string | undefined) {
     },
     enabled: !!projectPath,
     staleTime: STALE_TIMES.SETTINGS,
+    refetchOnWindowFocus: WORKTREE_REFETCH_ON_FOCUS,
+    refetchOnReconnect: WORKTREE_REFETCH_ON_RECONNECT,
   });
 }
 
@@ -249,5 +264,7 @@ export function useAvailableEditors() {
       return result.editors ?? [];
     },
     staleTime: STALE_TIMES.CLI_STATUS,
+    refetchOnWindowFocus: WORKTREE_REFETCH_ON_FOCUS,
+    refetchOnReconnect: WORKTREE_REFETCH_ON_RECONNECT,
   });
 }

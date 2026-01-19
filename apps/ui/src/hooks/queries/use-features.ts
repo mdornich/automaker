@@ -12,6 +12,9 @@ import { queryKeys } from '@/lib/query-keys';
 import { STALE_TIMES } from '@/lib/query-client';
 import type { Feature } from '@/store/app-store';
 
+const FEATURES_REFETCH_ON_FOCUS = false;
+const FEATURES_REFETCH_ON_RECONNECT = false;
+
 /**
  * Fetch all features for a project
  *
@@ -37,6 +40,8 @@ export function useFeatures(projectPath: string | undefined) {
     },
     enabled: !!projectPath,
     staleTime: STALE_TIMES.FEATURES,
+    refetchOnWindowFocus: FEATURES_REFETCH_ON_FOCUS,
+    refetchOnReconnect: FEATURES_REFETCH_ON_RECONNECT,
   });
 }
 
@@ -75,6 +80,8 @@ export function useFeature(
     enabled: !!projectPath && !!featureId && enabled,
     staleTime: STALE_TIMES.FEATURES,
     refetchInterval: pollingInterval,
+    refetchOnWindowFocus: FEATURES_REFETCH_ON_FOCUS,
+    refetchOnReconnect: FEATURES_REFETCH_ON_RECONNECT,
   });
 }
 
@@ -123,5 +130,7 @@ export function useAgentOutput(
             }
             return false;
           },
+    refetchOnWindowFocus: FEATURES_REFETCH_ON_FOCUS,
+    refetchOnReconnect: FEATURES_REFETCH_ON_RECONNECT,
   });
 }

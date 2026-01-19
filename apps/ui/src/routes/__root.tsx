@@ -40,6 +40,7 @@ import { useIsCompact } from '@/hooks/use-media-query';
 import type { Project } from '@/lib/electron';
 
 const logger = createLogger('RootLayout');
+const SHOW_QUERY_DEVTOOLS = import.meta.env.DEV;
 const SERVER_READY_MAX_ATTEMPTS = 8;
 const SERVER_READY_BACKOFF_BASE_MS = 250;
 const SERVER_READY_MAX_DELAY_MS = 1500;
@@ -899,7 +900,9 @@ function RootLayout() {
       <FileBrowserProvider>
         <RootLayoutContent />
       </FileBrowserProvider>
-      <ReactQueryDevtools initialIsOpen={false} buttonPosition="bottom-left" />
+      {SHOW_QUERY_DEVTOOLS ? (
+        <ReactQueryDevtools initialIsOpen={false} buttonPosition="bottom-left" />
+      ) : null}
     </QueryClientProvider>
   );
 }
