@@ -244,28 +244,26 @@ export function UsagePopover() {
     return 'bg-green-500';
   };
 
-  // Determine which provider icon and percentage to show based on active tab
-  const getTabInfo = () => {
-    if (activeTab === 'claude') {
-      return {
+  // Determine which provider icon and percentage to show on the header button
+  const hasClaudeUsage = Boolean(claudeUsage);
+  const hasCodexUsage = Boolean(codexUsage);
+  const useClaudeIndicator = hasClaudeUsage || (!hasCodexUsage && isClaudeAuthenticated);
+  const indicatorInfo = useClaudeIndicator
+    ? {
         icon: AnthropicIcon,
         percentage: claudeSessionPercentage,
         isStale: isClaudeStale,
+        title: `Session usage (${CLAUDE_SESSION_WINDOW_HOURS}h window)`,
+      }
+    : {
+        icon: OpenAIIcon,
+        percentage: codexMaxPercentage,
+        isStale: isCodexStale,
+        title: 'Usage',
       };
-    }
-    return {
-      icon: OpenAIIcon,
-      percentage: codexMaxPercentage,
-      isStale: isCodexStale,
-    };
-  };
 
-  const tabInfo = getTabInfo();
-  const statusColor = getStatusInfo(tabInfo.percentage).color;
-  const ProviderIcon = tabInfo.icon;
-
-  const indicatorTitle =
-    activeTab === 'claude' ? `Session usage (${CLAUDE_SESSION_WINDOW_HOURS}h window)` : 'Usage';
+  const statusColor = getStatusInfo(indicatorInfo.percentage).color;
+  const ProviderIcon = indicatorInfo.icon;
 
   const trigger = (
     <Button variant="ghost" size="sm" className="h-9 gap-2 bg-secondary border border-border px-3">
@@ -273,18 +271,18 @@ export function UsagePopover() {
       <span className="text-sm font-medium">Usage</span>
       {(claudeUsage || codexUsage) && (
         <div
-          title={indicatorTitle}
+          title={indicatorInfo.title}
           className={cn(
             'h-1.5 w-16 bg-muted-foreground/20 rounded-full overflow-hidden transition-opacity',
-            tabInfo.isStale && 'opacity-60'
+            indicatorInfo.isStale && 'opacity-60'
           )}
         >
           <div
             className={cn(
               'h-full transition-all duration-500',
-              getProgressBarColor(tabInfo.percentage)
+              getProgressBarColor(indicatorInfo.percentage)
             )}
-            style={{ width: `${Math.min(tabInfo.percentage, 100)}%` }}
+            style={{ width: `${Math.min(indicatorInfo.percentage, 100)}%` }}
           />
         </div>
       )}
