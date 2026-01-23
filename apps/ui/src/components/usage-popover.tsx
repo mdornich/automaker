@@ -27,6 +27,8 @@ type UsageError = {
 
 // Fixed refresh interval (45 seconds)
 const REFRESH_INTERVAL_SECONDS = 45;
+const CLAUDE_SESSION_WINDOW_HOURS = 5;
+const CLAUDE_SESSION_WINDOW_BADGE = `${CLAUDE_SESSION_WINDOW_HOURS}h`;
 
 // Helper to format reset time for Codex
 function formatCodexResetTime(unixTimestamp: number): string {
@@ -226,9 +228,7 @@ export function UsagePopover() {
   };
 
   // Calculate max percentage for header button
-  const claudeMaxPercentage = claudeUsage
-    ? Math.max(claudeUsage.sessionPercentage || 0, claudeUsage.weeklyPercentage || 0)
-    : 0;
+  const claudeSessionPercentage = claudeUsage?.sessionPercentage || 0;
 
   const codexMaxPercentage = codexUsage?.rateLimits
     ? Math.max(
@@ -237,7 +237,6 @@ export function UsagePopover() {
       )
     : 0;
 
-  const maxPercentage = Math.max(claudeMaxPercentage, codexMaxPercentage);
   const isStale = activeTab === 'claude' ? isClaudeStale : isCodexStale;
 
   const getProgressBarColor = (percentage: number) => {
@@ -251,7 +250,7 @@ export function UsagePopover() {
     if (activeTab === 'claude') {
       return {
         icon: AnthropicIcon,
-        percentage: claudeMaxPercentage,
+        percentage: claudeSessionPercentage,
         isStale: isClaudeStale,
       };
     }
@@ -270,6 +269,11 @@ export function UsagePopover() {
     <Button variant="ghost" size="sm" className="h-9 gap-2 bg-secondary border border-border px-3">
       {(claudeUsage || codexUsage) && <ProviderIcon className={cn('w-4 h-4', statusColor)} />}
       <span className="text-sm font-medium">Usage</span>
+      {activeTab === 'claude' && (
+        <span className="text-[10px] font-medium text-muted-foreground">
+          {CLAUDE_SESSION_WINDOW_BADGE}
+        </span>
+      )}
       {(claudeUsage || codexUsage) && (
         <div
           className={cn(

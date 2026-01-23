@@ -1,4 +1,4 @@
-import { useId, type ComponentType, type SVGProps } from 'react';
+import type { ComponentType, ImgHTMLAttributes, SVGProps } from 'react';
 import { cn } from '@/lib/utils';
 import type { AgentModel, ModelProvider } from '@automaker/types';
 import { getProviderFromModel } from '@/lib/utils';
@@ -166,16 +166,14 @@ export function CursorIcon(props: Omit<ProviderIconProps, 'provider'>) {
   return <ProviderIcon provider={PROVIDER_ICON_KEYS.cursor} {...props} />;
 }
 
-const GEMINI_GRADIENT_STOPS = [
-  { offset: '0%', color: '#4285F4' },
-  { offset: '33%', color: '#EA4335' },
-  { offset: '66%', color: '#FBBC04' },
-  { offset: '100%', color: '#34A853' },
-] as const;
+const GEMINI_ICON_URL = new URL('../../assets/icons/gemini-icon.svg', import.meta.url).toString();
+const GEMINI_ICON_ALT = 'Gemini';
 
-export function GeminiIcon({ title, className, ...props }: Omit<ProviderIconProps, 'provider'>) {
-  const definition = PROVIDER_ICON_DEFINITIONS[PROVIDER_ICON_KEYS.gemini];
-  const gradientId = useId();
+type GeminiIconProps = Omit<ImgHTMLAttributes<HTMLImageElement>, 'src'> & {
+  title?: string;
+};
+
+export function GeminiIcon({ title, className, ...props }: GeminiIconProps) {
   const {
     role,
     'aria-label': ariaLabel,
@@ -184,30 +182,19 @@ export function GeminiIcon({ title, className, ...props }: Omit<ProviderIconProp
     ...rest
   } = props;
   const hasAccessibleLabel = Boolean(title || ariaLabel || ariaLabelledby);
+  const fallbackAlt = hasAccessibleLabel ? (title ?? ariaLabel ?? GEMINI_ICON_ALT) : '';
 
   return (
-    <svg
-      viewBox={definition.viewBox}
+    <img
+      src={GEMINI_ICON_URL}
       className={cn('inline-block', className)}
       role={role ?? (hasAccessibleLabel ? 'img' : 'presentation')}
       aria-hidden={ariaHidden ?? !hasAccessibleLabel}
-      focusable="false"
+      aria-label={ariaLabel}
+      aria-labelledby={ariaLabelledby}
+      alt={fallbackAlt}
       {...rest}
-    >
-      {title && <title>{title}</title>}
-      <defs>
-        <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="100%">
-          {GEMINI_GRADIENT_STOPS.map((stop) => (
-            <stop
-              key={stop.offset}
-              offset={stop.offset}
-              style={{ stopColor: stop.color, stopOpacity: 1 }}
-            />
-          ))}
-        </linearGradient>
-      </defs>
-      <path d={definition.path} fill={`url(#${gradientId})`} fillRule={definition.fillRule} />
-    </svg>
+    />
   );
 }
 
