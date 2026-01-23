@@ -244,23 +244,26 @@ export function UsagePopover() {
     return 'bg-green-500';
   };
 
-  // Determine which provider icon and percentage to show on the header button
-  const hasClaudeUsage = Boolean(claudeUsage);
-  const hasCodexUsage = Boolean(codexUsage);
-  const useClaudeIndicator = hasClaudeUsage || (!hasCodexUsage && isClaudeAuthenticated);
-  const indicatorInfo = useClaudeIndicator
-    ? {
-        icon: AnthropicIcon,
-        percentage: claudeSessionPercentage,
-        isStale: isClaudeStale,
-        title: `Session usage (${CLAUDE_SESSION_WINDOW_HOURS}h window)`,
-      }
-    : {
-        icon: OpenAIIcon,
-        percentage: codexMaxPercentage,
-        isStale: isCodexStale,
-        title: 'Usage',
-      };
+  const codexWindowMinutes = codexUsage?.rateLimits?.primary?.windowDurationMins ?? null;
+  const codexWindowLabel = codexWindowMinutes
+    ? getCodexWindowLabel(codexWindowMinutes).title
+    : 'Window';
+
+  // Determine which provider icon and percentage to show based on active tab
+  const indicatorInfo =
+    activeTab === 'claude'
+      ? {
+          icon: AnthropicIcon,
+          percentage: claudeSessionPercentage,
+          isStale: isClaudeStale,
+          title: `Session usage (${CLAUDE_SESSION_WINDOW_HOURS}h window)`,
+        }
+      : {
+          icon: OpenAIIcon,
+          percentage: codexMaxPercentage,
+          isStale: isCodexStale,
+          title: `Usage (${codexWindowLabel})`,
+        };
 
   const statusColor = getStatusInfo(indicatorInfo.percentage).color;
   const ProviderIcon = indicatorInfo.icon;
