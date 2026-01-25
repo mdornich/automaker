@@ -43,7 +43,7 @@ import type { WorkMode } from '../shared';
 import { PhaseModelSelector } from '@/components/views/settings-view/model-defaults/phase-model-selector';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { DependencyTreeDialog } from './dependency-tree-dialog';
-import { isClaudeModel, supportsReasoningEffort } from '@automaker/types';
+import { supportsReasoningEffort } from '@automaker/types';
 
 const logger = createLogger('EditFeatureDialog');
 
@@ -119,9 +119,6 @@ export function EditFeatureDialog({
     reasoningEffort: feature?.reasoningEffort || 'none',
   }));
 
-  // Check if current model supports planning mode (Claude/Anthropic only)
-  const modelSupportsPlanningMode = isClaudeModel(modelEntry.model);
-
   // Track the source of description changes for history
   const [descriptionChangeSource, setDescriptionChangeSource] = useState<
     { source: 'enhance'; mode: EnhancementMode } | 'edit' | null
@@ -193,6 +190,13 @@ export function EditFeatureDialog({
       setExcludedPipelineSteps([]);
     }
   }, [feature, allFeatures]);
+
+  // Clear requirePlanApproval when planning mode is skip or lite
+  useEffect(() => {
+    if (planningMode === 'skip' || planningMode === 'lite') {
+      setRequirePlanApproval(false);
+    }
+  }, [planningMode]);
 
   const handleModelChange = (entry: PhaseModelEntry) => {
     setModelEntry(entry);
@@ -452,39 +456,13 @@ export function EditFeatureDialog({
 
             <div className="grid gap-3 grid-cols-2">
               <div className="space-y-1.5">
-                <Label
-                  className={cn(
-                    'text-xs text-muted-foreground',
-                    !modelSupportsPlanningMode && 'opacity-50'
-                  )}
-                >
-                  Planning
-                </Label>
-                {modelSupportsPlanningMode ? (
-                  <PlanningModeSelect
-                    mode={planningMode}
-                    onModeChange={setPlanningMode}
-                    testIdPrefix="edit-feature-planning"
-                    compact
-                  />
-                ) : (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <div>
-                        <PlanningModeSelect
-                          mode="skip"
-                          onModeChange={() => {}}
-                          testIdPrefix="edit-feature-planning"
-                          compact
-                          disabled
-                        />
-                      </div>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Planning modes are only available for Claude Provider</p>
-                    </TooltipContent>
-                  </Tooltip>
-                )}
+                <Label className="text-xs text-muted-foreground">Planning</Label>
+                <PlanningModeSelect
+                  mode={planningMode}
+                  onModeChange={setPlanningMode}
+                  testIdPrefix="edit-feature-planning"
+                  compact
+                />
               </div>
               <div className="space-y-1.5">
                 <Label className="text-xs text-muted-foreground">Options</Label>
@@ -510,20 +488,14 @@ export function EditFeatureDialog({
                       id="edit-feature-require-approval"
                       checked={requirePlanApproval}
                       onCheckedChange={(checked) => setRequirePlanApproval(!!checked)}
-                      disabled={
-                        !modelSupportsPlanningMode ||
-                        planningMode === 'skip' ||
-                        planningMode === 'lite'
-                      }
+                      disabled={planningMode === 'skip' || planningMode === 'lite'}
                       data-testid="edit-feature-require-approval-checkbox"
                     />
                     <Label
                       htmlFor="edit-feature-require-approval"
                       className={cn(
                         'text-xs font-normal',
-                        !modelSupportsPlanningMode ||
-                          planningMode === 'skip' ||
-                          planningMode === 'lite'
+                        planningMode === 'skip' || planningMode === 'lite'
                           ? 'cursor-not-allowed text-muted-foreground'
                           : 'cursor-pointer'
                       )}

@@ -3,6 +3,7 @@
  */
 
 import type { ClaudeUsageResponse, CodexUsageResponse } from '@/store/app-store';
+import type { ParsedTask } from '@automaker/types';
 
 export interface ImageAttachment {
   id?: string; // Optional - may not be present in messages loaded from server
@@ -333,6 +334,20 @@ export type AutoModeEvent =
       featureId: string;
       projectPath?: string;
       phaseNumber: number;
+    }
+  | {
+      type: 'auto_mode_task_status';
+      featureId: string;
+      projectPath?: string;
+      taskId: string;
+      status: ParsedTask['status'];
+      tasks: ParsedTask[];
+    }
+  | {
+      type: 'auto_mode_summary';
+      featureId: string;
+      projectPath?: string;
+      summary: string;
     }
   | {
       type: 'auto_mode_resuming_features';

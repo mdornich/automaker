@@ -46,6 +46,10 @@ const SINGLE_FEATURE_INVALIDATION_EVENTS: AutoModeEvent['type'][] = [
   'auto_mode_feature_start',
   'auto_mode_phase',
   'auto_mode_phase_complete',
+  'auto_mode_task_status',
+  'auto_mode_task_started',
+  'auto_mode_task_complete',
+  'auto_mode_summary',
 ];
 
 /**
@@ -180,7 +184,7 @@ export function useAutoModeQueryInvalidation(projectPath: string | undefined) {
         });
       }
 
-      // Invalidate specific feature for phase changes
+      // Invalidate specific feature for phase changes and task status updates
       if (SINGLE_FEATURE_INVALIDATION_EVENTS.includes(event.type) && hasFeatureId(event)) {
         queryClient.invalidateQueries({
           queryKey: queryKeys.features.single(currentProjectPath, event.featureId),

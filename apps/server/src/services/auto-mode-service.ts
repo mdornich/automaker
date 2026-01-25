@@ -20,6 +20,8 @@ import type {
   PipelineConfig,
   ThinkingLevel,
   PlanningMode,
+  ParsedTask,
+  PlanSpec,
 } from '@automaker/types';
 import {
   DEFAULT_PHASE_MODELS,
@@ -90,28 +92,7 @@ async function getCurrentBranch(projectPath: string): Promise<string | null> {
   }
 }
 
-// PlanningMode type is imported from @automaker/types
-
-interface ParsedTask {
-  id: string; // e.g., "T001"
-  description: string; // e.g., "Create user model"
-  filePath?: string; // e.g., "src/models/user.ts"
-  phase?: string; // e.g., "Phase 1: Foundation" (for full mode)
-  status: 'pending' | 'in_progress' | 'completed' | 'failed';
-}
-
-interface PlanSpec {
-  status: 'pending' | 'generating' | 'generated' | 'approved' | 'rejected';
-  content?: string;
-  version: number;
-  generatedAt?: string;
-  approvedAt?: string;
-  reviewedByUser: boolean;
-  tasksCompleted?: number;
-  tasksTotal?: number;
-  currentTaskId?: string;
-  tasks?: ParsedTask[];
-}
+// ParsedTask and PlanSpec types are imported from @automaker/types
 
 /**
  * Information about pipeline status when resuming a feature.
@@ -215,6 +196,141 @@ function parseTaskLine(line: string, currentPhase?: string): ParsedTask | null {
     phase: currentPhase,
     status: 'pending',
   };
+}
+
+/**
+ * Detect [TASK_START] marker in text and extract task ID
+ * Format: [TASK_START] T###: Description
+ */
+function detectTaskStartMarker(text: string): string | null {
+  const match = text.match(/\[TASK_START\]\s*(T\d{3})/);
+  return match ? match[1] : null;
+}
+
+/**
+ * Detect [TASK_COMPLETE] marker in text and extract task ID
+ * Format: [TASK_COMPLETE] T###: Brief summary
+ */
+function detectTaskCompleteMarker(text: string): string | null {
+  const match = text.match(/\[TASK_COMPLETE\]\s*(T\d{3})/);
+  return match ? match[1] : null;
+}
+
+/**
+ * Detect [PHASE_COMPLETE] marker in text and extract phase number
+ * Format: [PHASE_COMPLETE] Phase N complete
+ */
+function detectPhaseCompleteMarker(text: string): number | null {
+  const match = text.match(/\[PHASE_COMPLETE\]\s*Phase\s*(\d+)/i);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+/**
+ * Fallback spec detection when [SPEC_GENERATED] marker is missing
+ * Looks for structural elements that indicate a spec was generated.
+ * This is especially important for non-Claude models that may not output
+ * the explicit [SPEC_GENERATED] marker.
+ *
+ * @param text - The text content to check for spec structure
+ * @returns true if the text appears to be a generated spec
+ */
+function detectSpecFallback(text: string): boolean {
+  // Check for key structural elements of a spec
+  const hasTasksBlock = /```tasks[\s\S]*```/.test(text);
+  const hasTaskLines = /- \[ \] T\d{3}:/.test(text);
+
+  // Check for common spec sections (case-insensitive)
+  const hasAcceptanceCriteria = /acceptance criteria/i.test(text);
+  const hasTechnicalContext = /technical context/i.test(text);
+  const hasProblemStatement = /problem statement/i.test(text);
+  const hasUserStory = /user story/i.test(text);
+  // Additional patterns for different model outputs
+  const hasGoal = /\*\*Goal\*\*:/i.test(text);
+  const hasSolution = /\*\*Solution\*\*:/i.test(text);
+  const hasImplementation = /implementation\s*(plan|steps|approach)/i.test(text);
+  const hasOverview = /##\s*(overview|summary)/i.test(text);
+
+  // Spec is detected if we have task structure AND at least some spec content
+  const hasTaskStructure = hasTasksBlock || hasTaskLines;
+  const hasSpecContent =
+    hasAcceptanceCriteria ||
+    hasTechnicalContext ||
+    hasProblemStatement ||
+    hasUserStory ||
+    hasGoal ||
+    hasSolution ||
+    hasImplementation ||
+    hasOverview;
+
+  return hasTaskStructure && hasSpecContent;
+}
+
+/**
+ * Extract summary from text content
+ * Checks for multiple formats in order of priority:
+ * 1. Explicit <summary> tags
+ * 2. ## Summary section (markdown)
+ * 3. **Goal**: section (lite planning mode)
+ * 4. **Problem**: or **Problem Statement**: section (spec/full modes)
+ * 5. **Solution**: section as fallback
+ *
+ * Note: Uses last match for each pattern to avoid stale summaries
+ * when agent output accumulates across multiple runs.
+ *
+ * @param text - The text content to extract summary from
+ * @returns The extracted summary string, or null if no summary found
+ */
+function extractSummary(text: string): string | null {
+  // Helper to truncate content to first paragraph with max length
+  const truncate = (content: string, maxLength: number): string => {
+    const firstPara = content.split(/\n\n/)[0];
+    return firstPara.length > maxLength ? `${firstPara.substring(0, maxLength)}...` : firstPara;
+  };
+
+  // Helper to get last match from matchAll results
+  const getLastMatch = (matches: IterableIterator<RegExpMatchArray>): RegExpMatchArray | null => {
+    const arr = [...matches];
+    return arr.length > 0 ? arr[arr.length - 1] : null;
+  };
+
+  // Check for explicit <summary> tags first (use last match to avoid stale summaries)
+  const summaryMatches = text.matchAll(/<summary>([\s\S]*?)<\/summary>/g);
+  const summaryMatch = getLastMatch(summaryMatches);
+  if (summaryMatch) {
+    return summaryMatch[1].trim();
+  }
+
+  // Check for ## Summary section (use last match)
+  const sectionMatches = text.matchAll(/##\s*Summary\s*\n+([\s\S]*?)(?=\n##|\n\*\*|$)/gi);
+  const sectionMatch = getLastMatch(sectionMatches);
+  if (sectionMatch) {
+    return truncate(sectionMatch[1].trim(), 500);
+  }
+
+  // Check for **Goal**: section (lite mode, use last match)
+  const goalMatches = text.matchAll(/\*\*Goal\*\*:\s*(.+?)(?:\n|$)/gi);
+  const goalMatch = getLastMatch(goalMatches);
+  if (goalMatch) {
+    return goalMatch[1].trim();
+  }
+
+  // Check for **Problem**: or **Problem Statement**: section (spec/full modes, use last match)
+  const problemMatches = text.matchAll(
+    /\*\*Problem(?:\s*Statement)?\*\*:\s*([\s\S]*?)(?=\n\d+\.|\n\*\*|$)/gi
+  );
+  const problemMatch = getLastMatch(problemMatches);
+  if (problemMatch) {
+    return truncate(problemMatch[1].trim(), 500);
+  }
+
+  // Check for **Solution**: section as fallback (use last match)
+  const solutionMatches = text.matchAll(/\*\*Solution\*\*:\s*([\s\S]*?)(?=\n\d+\.|\n\*\*|$)/gi);
+  const solutionMatch = getLastMatch(solutionMatches);
+  if (solutionMatch) {
+    return truncate(solutionMatch[1].trim(), 300);
+  }
+
+  return null;
 }
 
 // Feature type is imported from feature-loader.js
@@ -401,6 +517,83 @@ export class AutoModeService {
     entry.leaseCount -= 1;
     if (entry.leaseCount <= 0) {
       this.runningFeatures.delete(featureId);
+    }
+  }
+
+  /**
+   * Reset features that were stuck in transient states due to server crash
+   * Called when auto mode is enabled to clean up from previous session
+   * @param projectPath - The project path to reset features for
+   */
+  async resetStuckFeatures(projectPath: string): Promise<void> {
+    const featuresDir = getFeaturesDir(projectPath);
+
+    try {
+      const entries = await secureFs.readdir(featuresDir, { withFileTypes: true });
+
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+
+        const featurePath = path.join(featuresDir, entry.name, 'feature.json');
+        const result = await readJsonWithRecovery<Feature | null>(featurePath, null, {
+          maxBackups: DEFAULT_BACKUP_COUNT,
+          autoRestore: true,
+        });
+
+        const feature = result.data;
+        if (!feature) continue;
+
+        let needsUpdate = false;
+
+        // Reset in_progress features back to ready/backlog
+        if (feature.status === 'in_progress') {
+          const hasApprovedPlan = feature.planSpec?.status === 'approved';
+          feature.status = hasApprovedPlan ? 'ready' : 'backlog';
+          needsUpdate = true;
+          logger.info(
+            `[resetStuckFeatures] Reset feature ${feature.id} from in_progress to ${feature.status}`
+          );
+        }
+
+        // Reset generating planSpec status back to pending (spec generation was interrupted)
+        if (feature.planSpec?.status === 'generating') {
+          feature.planSpec.status = 'pending';
+          needsUpdate = true;
+          logger.info(
+            `[resetStuckFeatures] Reset feature ${feature.id} planSpec status from generating to pending`
+          );
+        }
+
+        // Reset any in_progress tasks back to pending (task execution was interrupted)
+        if (feature.planSpec?.tasks) {
+          for (const task of feature.planSpec.tasks) {
+            if (task.status === 'in_progress') {
+              task.status = 'pending';
+              needsUpdate = true;
+              logger.info(
+                `[resetStuckFeatures] Reset task ${task.id} for feature ${feature.id} from in_progress to pending`
+              );
+              // Clear currentTaskId if it points to this reverted task
+              if (feature.planSpec?.currentTaskId === task.id) {
+                feature.planSpec.currentTaskId = undefined;
+                logger.info(
+                  `[resetStuckFeatures] Cleared planSpec.currentTaskId for feature ${feature.id} (was pointing to reverted task ${task.id})`
+                );
+              }
+            }
+          }
+        }
+
+        if (needsUpdate) {
+          feature.updatedAt = new Date().toISOString();
+          await atomicWriteJson(featurePath, feature, { backupCount: DEFAULT_BACKUP_COUNT });
+        }
+      }
+    } catch (error) {
+      // If features directory doesn't exist, that's fine
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        logger.error(`[resetStuckFeatures] Error resetting features for ${projectPath}:`, error);
+      }
     }
   }
 
@@ -675,6 +868,14 @@ export class AutoModeService {
     logger.info(
       `Starting auto loop for ${worktreeDesc} in project: ${projectPath} with maxConcurrency: ${resolvedMaxConcurrency}`
     );
+
+    // Reset any features that were stuck in transient states due to previous server crash
+    try {
+      await this.resetStuckFeatures(projectPath);
+    } catch (error) {
+      logger.warn(`[startAutoLoopForProject] Error resetting stuck features:`, error);
+      // Don't fail startup due to reset errors
+    }
 
     this.emitAutoModeEvent('auto_mode_started', {
       message: `Auto mode started with max ${resolvedMaxConcurrency} concurrent features`,
@@ -1377,7 +1578,7 @@ export class AutoModeService {
       // Record success to reset consecutive failure tracking
       this.recordSuccess();
 
-      // Record learnings and memory usage after successful feature completion
+      // Record learnings, memory usage, and extract summary after successful feature completion
       try {
         const featureDir = getFeatureDir(projectPath, featureId);
         const outputPath = path.join(featureDir, 'agent-output.md');
@@ -1388,6 +1589,15 @@ export class AutoModeService {
             typeof outputContent === 'string' ? outputContent : outputContent.toString();
         } catch {
           // Agent output might not exist yet
+        }
+
+        // Extract and save summary from agent output
+        if (agentOutput) {
+          const summary = extractSummary(agentOutput);
+          if (summary) {
+            logger.info(`Extracted summary for feature ${featureId}`);
+            await this.saveFeatureSummary(projectPath, featureId, summary);
+          }
         }
 
         // Record memory usage if we loaded any memory files
@@ -3248,6 +3458,162 @@ Format your response as a structured markdown document.`;
   }
 
   /**
+   * Save the extracted summary to a feature's summary field.
+   * This is called after agent execution completes to save a summary
+   * extracted from the agent's output using <summary> tags.
+   *
+   * Note: This is different from updateFeatureSummary which updates
+   * the description field during plan generation.
+   *
+   * @param projectPath - The project path
+   * @param featureId - The feature ID
+   * @param summary - The summary text to save
+   */
+  private async saveFeatureSummary(
+    projectPath: string,
+    featureId: string,
+    summary: string
+  ): Promise<void> {
+    const featureDir = getFeatureDir(projectPath, featureId);
+    const featurePath = path.join(featureDir, 'feature.json');
+
+    try {
+      const result = await readJsonWithRecovery<Feature | null>(featurePath, null, {
+        maxBackups: DEFAULT_BACKUP_COUNT,
+        autoRestore: true,
+      });
+
+      logRecoveryWarning(result, `Feature ${featureId}`, logger);
+
+      const feature = result.data;
+      if (!feature) {
+        logger.warn(`Feature ${featureId} not found or could not be recovered`);
+        return;
+      }
+
+      feature.summary = summary;
+      feature.updatedAt = new Date().toISOString();
+
+      await atomicWriteJson(featurePath, feature, { backupCount: DEFAULT_BACKUP_COUNT });
+
+      this.emitAutoModeEvent('auto_mode_summary', {
+        featureId,
+        projectPath,
+        summary,
+      });
+    } catch (error) {
+      logger.error(`Failed to save summary for ${featureId}:`, error);
+    }
+  }
+
+  /**
+   * Update the status of a specific task within planSpec.tasks
+   */
+  private async updateTaskStatus(
+    projectPath: string,
+    featureId: string,
+    taskId: string,
+    status: ParsedTask['status']
+  ): Promise<void> {
+    // Use getFeatureDir helper for consistent path resolution
+    const featureDir = getFeatureDir(projectPath, featureId);
+    const featurePath = path.join(featureDir, 'feature.json');
+
+    try {
+      // Use recovery-enabled read for corrupted file handling
+      const result = await readJsonWithRecovery<Feature | null>(featurePath, null, {
+        maxBackups: DEFAULT_BACKUP_COUNT,
+        autoRestore: true,
+      });
+
+      logRecoveryWarning(result, `Feature ${featureId}`, logger);
+
+      const feature = result.data;
+      if (!feature || !feature.planSpec?.tasks) {
+        logger.warn(`Feature ${featureId} not found or has no tasks`);
+        return;
+      }
+
+      // Find and update the task
+      const task = feature.planSpec.tasks.find((t) => t.id === taskId);
+      if (task) {
+        task.status = status;
+        feature.updatedAt = new Date().toISOString();
+
+        // Use atomic write with backup support
+        await atomicWriteJson(featurePath, feature, { backupCount: DEFAULT_BACKUP_COUNT });
+
+        // Emit event for UI update
+        this.emitAutoModeEvent('auto_mode_task_status', {
+          featureId,
+          projectPath,
+          taskId,
+          status,
+          tasks: feature.planSpec.tasks,
+        });
+      }
+    } catch (error) {
+      logger.error(`Failed to update task ${taskId} status for ${featureId}:`, error);
+    }
+  }
+
+  /**
+   * Update the description of a feature based on extracted summary from plan content.
+   * This is called when a plan is generated during spec/full planning modes.
+   *
+   * Only updates the description if it's short (<50 chars), same as title,
+   * or starts with generic verbs like "implement/add/create/fix/update".
+   *
+   * Note: This is different from saveFeatureSummary which saves to the
+   * separate summary field after agent execution.
+   *
+   * @param projectPath - The project path
+   * @param featureId - The feature ID
+   * @param summary - The summary text extracted from the plan
+   */
+  private async updateFeatureSummary(
+    projectPath: string,
+    featureId: string,
+    summary: string
+  ): Promise<void> {
+    const featureDir = getFeatureDir(projectPath, featureId);
+    const featurePath = path.join(featureDir, 'feature.json');
+
+    try {
+      const result = await readJsonWithRecovery<Feature | null>(featurePath, null, {
+        maxBackups: DEFAULT_BACKUP_COUNT,
+        autoRestore: true,
+      });
+
+      logRecoveryWarning(result, `Feature ${featureId}`, logger);
+
+      const feature = result.data;
+      if (!feature) {
+        logger.warn(`Feature ${featureId} not found`);
+        return;
+      }
+
+      // Only update if the feature doesn't already have a detailed description
+      // (Don't overwrite user-provided descriptions with extracted summaries)
+      const currentDesc = feature.description || '';
+      const isShortOrGeneric =
+        currentDesc.length < 50 ||
+        currentDesc === feature.title ||
+        /^(implement|add|create|fix|update)\s/i.test(currentDesc);
+
+      if (isShortOrGeneric) {
+        feature.description = summary;
+        feature.updatedAt = new Date().toISOString();
+
+        await atomicWriteJson(featurePath, feature, { backupCount: DEFAULT_BACKUP_COUNT });
+        logger.info(`Updated feature ${featureId} description with extracted summary`);
+      }
+    } catch (error) {
+      logger.error(`Failed to update summary for ${featureId}:`, error);
+    }
+  }
+
+  /**
    * Load pending features for a specific project/worktree
    * @param projectPath - The project path
    * @param branchName - The branch name to filter by, or null for main worktree (features without branchName)
@@ -3294,13 +3660,22 @@ Format your response as a structured markdown document.`;
           // Track pending features separately, filtered by worktree/branch
           // Note: waiting_approval is NOT included - those features have completed execution
           // and are waiting for user review, they should not be picked up again
-          if (
+          //
+          // Recovery cases:
+          // 1. Standard pending/ready/backlog statuses
+          // 2. Features with approved plans that have incomplete tasks (crash recovery)
+          // 3. Features stuck in 'in_progress' status (crash recovery)
+          // 4. Features with 'generating' planSpec status (spec generation was interrupted)
+          const needsRecovery =
             feature.status === 'pending' ||
             feature.status === 'ready' ||
             feature.status === 'backlog' ||
+            feature.status === 'in_progress' || // Recover features that were in progress when server crashed
             (feature.planSpec?.status === 'approved' &&
-              (feature.planSpec.tasksCompleted ?? 0) < (feature.planSpec.tasksTotal ?? 0))
-          ) {
+              (feature.planSpec.tasksCompleted ?? 0) < (feature.planSpec.tasksTotal ?? 0)) ||
+            feature.planSpec?.status === 'generating'; // Recover interrupted spec generation
+
+          if (needsRecovery) {
             // Filter by branchName:
             // - If branchName is null (main worktree), include features with:
             //   - branchName === null, OR
@@ -3335,7 +3710,7 @@ Format your response as a structured markdown document.`;
 
       const worktreeDesc = branchName ? `worktree ${branchName}` : 'main worktree';
       logger.info(
-        `[loadPendingFeatures] Found ${allFeatures.length} total features, ${pendingFeatures.length} candidates (pending/ready/backlog/approved_with_pending_tasks) for ${worktreeDesc}`
+        `[loadPendingFeatures] Found ${allFeatures.length} total features, ${pendingFeatures.length} candidates (pending/ready/backlog/in_progress/approved_with_pending_tasks/generating) for ${worktreeDesc}`
       );
 
       if (pendingFeatures.length === 0) {
@@ -3600,6 +3975,21 @@ You can use the Read tool to view these images at any time during implementation
       (planningMode === 'lite' && options?.requirePlanApproval === true);
     const requiresApproval = planningModeRequiresApproval && options?.requirePlanApproval === true;
 
+    // Check if feature already has an approved plan with tasks (recovery scenario)
+    // If so, we should skip spec detection and use persisted task status
+    let existingApprovedPlan: Feature['planSpec'] | undefined;
+    let persistedTasks: ParsedTask[] | undefined;
+    if (planningModeRequiresApproval) {
+      const feature = await this.loadFeature(projectPath, featureId);
+      if (feature?.planSpec?.status === 'approved' && feature.planSpec.tasks) {
+        existingApprovedPlan = feature.planSpec;
+        persistedTasks = feature.planSpec.tasks;
+        logger.info(
+          `Recovery: Using persisted tasks for feature ${featureId} (${persistedTasks.length} tasks, ${persistedTasks.filter((t) => t.status === 'completed').length} completed)`
+        );
+      }
+    }
+
     // CI/CD Mock Mode: Return early with mock response when AUTOMAKER_MOCK_AGENT is set
     // This prevents actual API calls during automated testing
     if (process.env.AUTOMAKER_MOCK_AGENT === 'true') {
@@ -3764,7 +4154,8 @@ This mock response was generated because AUTOMAKER_MOCK_AGENT=true was set.
     let responseText = previousContent
       ? `${previousContent}\n\n---\n\n## Follow-up Session\n\n`
       : '';
-    let specDetected = false;
+    // Skip spec detection if we already have an approved plan (recovery scenario)
+    let specDetected = !!existingApprovedPlan;
 
     // Agent output goes to .automaker directory
     // Note: We use projectPath here, not workDir, because workDir might be a worktree path
@@ -3847,6 +4238,164 @@ This mock response was generated because AUTOMAKER_MOCK_AGENT=true was set.
       );
     }, STREAM_HEARTBEAT_MS);
 
+    // RECOVERY PATH: If we have an approved plan with persisted tasks, skip spec generation
+    // and directly execute the remaining tasks
+    if (existingApprovedPlan && persistedTasks && persistedTasks.length > 0) {
+      logger.info(
+        `Recovery: Resuming task execution for feature ${featureId} with ${persistedTasks.length} tasks`
+      );
+
+      // Get customized prompts for task execution
+      const taskPrompts = await getPromptCustomization(this.settingsService, '[AutoMode]');
+      const approvedPlanContent = existingApprovedPlan.content || '';
+
+      // Execute each task with a separate agent
+      for (let taskIndex = 0; taskIndex < persistedTasks.length; taskIndex++) {
+        const task = persistedTasks[taskIndex];
+
+        // Skip tasks that are already completed
+        if (task.status === 'completed') {
+          logger.info(`Skipping already completed task ${task.id}`);
+          continue;
+        }
+
+        // Check for abort
+        if (abortController.signal.aborted) {
+          throw new Error('Feature execution aborted');
+        }
+
+        // Mark task as in_progress immediately (even without TASK_START marker)
+        await this.updateTaskStatus(projectPath, featureId, task.id, 'in_progress');
+
+        // Emit task started
+        logger.info(`Starting task ${task.id}: ${task.description}`);
+        this.emitAutoModeEvent('auto_mode_task_started', {
+          featureId,
+          projectPath,
+          branchName,
+          taskId: task.id,
+          taskDescription: task.description,
+          taskIndex,
+          tasksTotal: persistedTasks.length,
+        });
+
+        // Update planSpec with current task
+        await this.updateFeaturePlanSpec(projectPath, featureId, {
+          currentTaskId: task.id,
+        });
+
+        // Build focused prompt for this specific task
+        const taskPrompt = this.buildTaskPrompt(
+          task,
+          persistedTasks,
+          taskIndex,
+          approvedPlanContent,
+          taskPrompts.taskExecution.taskPromptTemplate,
+          undefined
+        );
+
+        // Execute task with dedicated agent
+        const taskStream = provider.executeQuery({
+          prompt: taskPrompt,
+          model: effectiveBareModel,
+          maxTurns: Math.min(maxTurns || 100, 50),
+          cwd: workDir,
+          allowedTools: allowedTools,
+          abortController,
+          mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
+          credentials,
+          claudeCompatibleProvider,
+        });
+
+        let taskOutput = '';
+        let taskCompleteDetected = false;
+
+        // Process task stream
+        for await (const msg of taskStream) {
+          if (msg.type === 'assistant' && msg.message?.content) {
+            for (const block of msg.message.content) {
+              if (block.type === 'text') {
+                const text = block.text || '';
+                taskOutput += text;
+                responseText += text;
+                this.emitAutoModeEvent('auto_mode_progress', {
+                  featureId,
+                  branchName,
+                  content: text,
+                });
+                scheduleWrite();
+
+                // Detect [TASK_COMPLETE] marker
+                if (!taskCompleteDetected) {
+                  const completeTaskId = detectTaskCompleteMarker(taskOutput);
+                  if (completeTaskId) {
+                    taskCompleteDetected = true;
+                    logger.info(`[TASK_COMPLETE] detected for ${completeTaskId}`);
+                    await this.updateTaskStatus(
+                      projectPath,
+                      featureId,
+                      completeTaskId,
+                      'completed'
+                    );
+                  }
+                }
+              } else if (block.type === 'tool_use') {
+                this.emitAutoModeEvent('auto_mode_tool', {
+                  featureId,
+                  branchName,
+                  tool: block.name,
+                  input: block.input,
+                });
+              }
+            }
+          } else if (msg.type === 'error') {
+            throw new Error(msg.error || `Error during task ${task.id}`);
+          } else if (msg.type === 'result' && msg.subtype === 'success') {
+            taskOutput += msg.result || '';
+            responseText += msg.result || '';
+          }
+        }
+
+        // If no [TASK_COMPLETE] marker was detected, still mark as completed
+        if (!taskCompleteDetected) {
+          await this.updateTaskStatus(projectPath, featureId, task.id, 'completed');
+        }
+
+        // Emit task completed
+        logger.info(`Task ${task.id} completed for feature ${featureId}`);
+        this.emitAutoModeEvent('auto_mode_task_complete', {
+          featureId,
+          projectPath,
+          branchName,
+          taskId: task.id,
+          tasksCompleted: taskIndex + 1,
+          tasksTotal: persistedTasks.length,
+        });
+
+        // Update planSpec with progress
+        await this.updateFeaturePlanSpec(projectPath, featureId, {
+          tasksCompleted: taskIndex + 1,
+        });
+      }
+
+      logger.info(`Recovery: All tasks completed for feature ${featureId}`);
+
+      // Extract and save final summary
+      // Note: saveFeatureSummary already emits auto_mode_summary event
+      const summary = extractSummary(responseText);
+      if (summary) {
+        await this.saveFeatureSummary(projectPath, featureId, summary);
+      }
+
+      // Final write and cleanup
+      clearInterval(streamHeartbeat);
+      if (writeTimeout) {
+        clearTimeout(writeTimeout);
+      }
+      await writeToFile();
+      return;
+    }
+
     // Wrap stream processing in try/finally to ensure timeout cleanup on any error/abort
     try {
       streamLoop: for await (const msg of stream) {
@@ -3903,16 +4452,28 @@ This mock response was generated because AUTOMAKER_MOCK_AGENT=true was set.
               scheduleWrite();
 
               // Check for [SPEC_GENERATED] marker in planning modes (spec or full)
+              // Also support fallback detection for non-Claude models that may not output the marker
+              const hasExplicitMarker = responseText.includes('[SPEC_GENERATED]');
+              const hasFallbackSpec = !hasExplicitMarker && detectSpecFallback(responseText);
               if (
                 planningModeRequiresApproval &&
                 !specDetected &&
-                responseText.includes('[SPEC_GENERATED]')
+                (hasExplicitMarker || hasFallbackSpec)
               ) {
                 specDetected = true;
 
-                // Extract plan content (everything before the marker)
-                const markerIndex = responseText.indexOf('[SPEC_GENERATED]');
-                const planContent = responseText.substring(0, markerIndex).trim();
+                // Extract plan content (everything before the marker, or full content for fallback)
+                let planContent: string;
+                if (hasExplicitMarker) {
+                  const markerIndex = responseText.indexOf('[SPEC_GENERATED]');
+                  planContent = responseText.substring(0, markerIndex).trim();
+                } else {
+                  // Fallback: use all accumulated content as the plan
+                  planContent = responseText.trim();
+                  logger.info(
+                    `Using fallback spec detection for feature ${featureId} (no [SPEC_GENERATED] marker)`
+                  );
+                }
 
                 // Parse tasks from the generated spec (for spec and full modes)
                 // Use let since we may need to update this after plan revision
@@ -3935,6 +4496,14 @@ This mock response was generated because AUTOMAKER_MOCK_AGENT=true was set.
                   tasksTotal,
                   tasksCompleted: 0,
                 });
+
+                // Extract and save summary from the plan content
+                const planSummary = extractSummary(planContent);
+                if (planSummary) {
+                  logger.info(`Extracted summary from plan: ${planSummary.substring(0, 100)}...`);
+                  // Update the feature with the extracted summary
+                  await this.updateFeatureSummary(projectPath, featureId, planSummary);
+                }
 
                 let approvedPlanContent = planContent;
                 let userFeedback: string | undefined;
@@ -4053,7 +4622,7 @@ After generating the revised spec, output:
                         // Make revision call
                         const revisionStream = provider.executeQuery({
                           prompt: revisionPrompt,
-                          model: bareModel,
+                          model: effectiveBareModel,
                           maxTurns: maxTurns || 100,
                           cwd: workDir,
                           allowedTools: allowedTools,
@@ -4167,10 +4736,19 @@ After generating the revised spec, output:
                   for (let taskIndex = 0; taskIndex < parsedTasks.length; taskIndex++) {
                     const task = parsedTasks[taskIndex];
 
+                    // Skip tasks that are already completed (for recovery after restart)
+                    if (task.status === 'completed') {
+                      logger.info(`Skipping already completed task ${task.id}`);
+                      continue;
+                    }
+
                     // Check for abort
                     if (abortController.signal.aborted) {
                       throw new Error('Feature execution aborted');
                     }
+
+                    // Mark task as in_progress immediately (even without TASK_START marker)
+                    await this.updateTaskStatus(projectPath, featureId, task.id, 'in_progress');
 
                     // Emit task started
                     logger.info(`Starting task ${task.id}: ${task.description}`);
@@ -4202,7 +4780,7 @@ After generating the revised spec, output:
                     // Execute task with dedicated agent
                     const taskStream = provider.executeQuery({
                       prompt: taskPrompt,
-                      model: bareModel,
+                      model: effectiveBareModel,
                       maxTurns: Math.min(maxTurns || 100, 50), // Limit turns per task
                       cwd: workDir,
                       allowedTools: allowedTools,
@@ -4213,19 +4791,75 @@ After generating the revised spec, output:
                     });
 
                     let taskOutput = '';
+                    let taskStartDetected = false;
+                    let taskCompleteDetected = false;
 
                     // Process task stream
                     for await (const msg of taskStream) {
                       if (msg.type === 'assistant' && msg.message?.content) {
                         for (const block of msg.message.content) {
                           if (block.type === 'text') {
-                            taskOutput += block.text || '';
-                            responseText += block.text || '';
+                            const text = block.text || '';
+                            taskOutput += text;
+                            responseText += text;
                             this.emitAutoModeEvent('auto_mode_progress', {
                               featureId,
                               branchName,
-                              content: block.text,
+                              content: text,
                             });
+
+                            // Detect [TASK_START] marker
+                            if (!taskStartDetected) {
+                              const startTaskId = detectTaskStartMarker(taskOutput);
+                              if (startTaskId) {
+                                taskStartDetected = true;
+                                logger.info(`[TASK_START] detected for ${startTaskId}`);
+                                // Update task status to in_progress in planSpec.tasks
+                                await this.updateTaskStatus(
+                                  projectPath,
+                                  featureId,
+                                  startTaskId,
+                                  'in_progress'
+                                );
+                                this.emitAutoModeEvent('auto_mode_task_started', {
+                                  featureId,
+                                  projectPath,
+                                  branchName,
+                                  taskId: startTaskId,
+                                  taskDescription: task.description,
+                                  taskIndex,
+                                  tasksTotal: parsedTasks.length,
+                                });
+                              }
+                            }
+
+                            // Detect [TASK_COMPLETE] marker
+                            if (!taskCompleteDetected) {
+                              const completeTaskId = detectTaskCompleteMarker(taskOutput);
+                              if (completeTaskId) {
+                                taskCompleteDetected = true;
+                                logger.info(`[TASK_COMPLETE] detected for ${completeTaskId}`);
+                                // Update task status to completed in planSpec.tasks
+                                await this.updateTaskStatus(
+                                  projectPath,
+                                  featureId,
+                                  completeTaskId,
+                                  'completed'
+                                );
+                              }
+                            }
+
+                            // Detect [PHASE_COMPLETE] marker
+                            const phaseNumber = detectPhaseCompleteMarker(text);
+                            if (phaseNumber !== null) {
+                              logger.info(`[PHASE_COMPLETE] detected for Phase ${phaseNumber}`);
+                              this.emitAutoModeEvent('auto_mode_phase_complete', {
+                                featureId,
+                                projectPath,
+                                branchName,
+                                phaseNumber,
+                              });
+                            }
                           } else if (block.type === 'tool_use') {
                             this.emitAutoModeEvent('auto_mode_tool', {
                               featureId,
@@ -4241,6 +4875,12 @@ After generating the revised spec, output:
                         taskOutput += msg.result || '';
                         responseText += msg.result || '';
                       }
+                    }
+
+                    // If no [TASK_COMPLETE] marker was detected, still mark as completed
+                    // (for models that don't output markers)
+                    if (!taskCompleteDetected) {
+                      await this.updateTaskStatus(projectPath, featureId, task.id, 'completed');
                     }
 
                     // Emit task completed
@@ -4302,7 +4942,7 @@ After generating the revised spec, output:
 
                   const continuationStream = provider.executeQuery({
                     prompt: continuationPrompt,
-                    model: bareModel,
+                    model: effectiveBareModel,
                     maxTurns: maxTurns,
                     cwd: workDir,
                     allowedTools: allowedTools,
@@ -4337,6 +4977,13 @@ After generating the revised spec, output:
                       responseText += msg.result || '';
                     }
                   }
+                }
+
+                // Extract and save final summary from multi-task or single-agent execution
+                // Note: saveFeatureSummary already emits auto_mode_summary event
+                const summary = extractSummary(responseText);
+                if (summary) {
+                  await this.saveFeatureSummary(projectPath, featureId, summary);
                 }
 
                 logger.info(`Implementation completed for feature ${featureId}`);
