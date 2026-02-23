@@ -5,6 +5,7 @@
  * but communicates with the backend server via HTTP/WebSocket.
  */
 
+import { createLogger } from '@automaker/utils/logger';
 import type {
   ElectronAPI,
   FileResult,
@@ -15,37 +16,134 @@ import type {
   SaveImageResult,
   AutoModeAPI,
   FeaturesAPI,
-  SuggestionsAPI,
   SpecRegenerationAPI,
   AutoModeEvent,
-  SuggestionsEvent,
   SpecRegenerationEvent,
-  SuggestionType,
   GitHubAPI,
-  GitHubIssue,
-  GitHubPR,
   IssueValidationInput,
   IssueValidationEvent,
+  IdeationAPI,
+  IdeaCategory,
+  AnalysisSuggestion,
+  StartSessionOptions,
+  CreateIdeaInput,
+  UpdateIdeaInput,
+  ConvertToFeatureOptions,
+  NotificationsAPI,
+  EventHistoryAPI,
+  CreatePROptions,
 } from './electron';
+import type {
+  IdeationContextSources,
+  EventHistoryFilter,
+  IdeationStreamEvent,
+  IdeationAnalysisEvent,
+  Notification,
+} from '@automaker/types';
 import type { Message, SessionListItem } from '@/types/electron';
-import type { Feature, ClaudeUsageResponse } from '@/store/app-store';
+import type { ClaudeUsageResponse, CodexUsageResponse } from '@/store/app-store';
 import type { WorktreeAPI, GitAPI, ModelDefinition, ProviderStatus } from '@/types/electron';
+import type { ModelId, ThinkingLevel, ReasoningEffort, Feature } from '@automaker/types';
 import { getGlobalFileBrowser } from '@/contexts/file-browser-context';
+
+const logger = createLogger('HttpClient');
+const NO_STORE_CACHE_MODE: RequestCache = 'no-store';
 
 // Cached server URL (set during initialization in Electron mode)
 let cachedServerUrl: string | null = null;
+
+/**
+ * Notify the UI that the current session is no longer valid.
+ * Used to redirect the user to a logged-out route on 401/403 responses.
+ */
+const notifyLoggedOut = (): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.dispatchEvent(new CustomEvent('automaker:logged-out'));
+  } catch {
+    // Ignore - navigation will still be handled by failed requests in most cases
+  }
+};
+
+/**
+ * Handle an unauthorized response in cookie/session auth flows.
+ * Clears in-memory token and attempts to clear the cookie (best-effort),
+ * then notifies the UI to redirect.
+ */
+const handleUnauthorized = (): void => {
+  clearSessionToken();
+  // Best-effort cookie clear (avoid throwing)
+  fetch(`${getServerUrl()}/api/auth/logout`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: '{}',
+    cache: NO_STORE_CACHE_MODE,
+  }).catch(() => {});
+  notifyLoggedOut();
+};
+
+/**
+ * Notify the UI that the server is offline/unreachable.
+ * Used to redirect the user to the login page which will show server unavailable.
+ */
+const notifyServerOffline = (): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.dispatchEvent(new CustomEvent('automaker:server-offline'));
+  } catch {
+    // Ignore
+  }
+};
+
+/**
+ * Check if an error is a connection error (server offline/unreachable).
+ * These are typically TypeError with 'Failed to fetch' or similar network errors.
+ */
+export const isConnectionError = (error: unknown): boolean => {
+  if (error instanceof TypeError) {
+    const message = error.message.toLowerCase();
+    return (
+      message.includes('failed to fetch') ||
+      message.includes('network') ||
+      message.includes('econnrefused') ||
+      message.includes('connection refused')
+    );
+  }
+  // Check for error objects with message property
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = String((error as { message: unknown }).message).toLowerCase();
+    return (
+      message.includes('failed to fetch') ||
+      message.includes('network') ||
+      message.includes('econnrefused') ||
+      message.includes('connection refused')
+    );
+  }
+  return false;
+};
+
+/**
+ * Handle a server offline error by notifying the UI to redirect.
+ * Call this when a connection error is detected.
+ */
+export const handleServerOffline = (): void => {
+  logger.error('Server appears to be offline, redirecting to login...');
+  notifyServerOffline();
+};
 
 /**
  * Initialize server URL from Electron IPC.
  * Must be called early in Electron mode before making API requests.
  */
 export const initServerUrl = async (): Promise<void> => {
-  if (typeof window !== 'undefined' && window.electronAPI?.getServerUrl) {
+  const electron = typeof window !== 'undefined' ? window.electronAPI : null;
+  if (electron?.getServerUrl) {
     try {
-      cachedServerUrl = await window.electronAPI.getServerUrl();
-      console.log('[HTTP Client] Server URL from Electron:', cachedServerUrl);
+      cachedServerUrl = await electron.getServerUrl();
+      logger.info('Server URL from Electron:', cachedServerUrl);
     } catch (error) {
-      console.warn('[HTTP Client] Failed to get server URL from Electron:', error);
+      logger.warn('Failed to get server URL from Electron:', error);
     }
   }
 };
@@ -60,8 +158,16 @@ const getServerUrl = (): string => {
   if (typeof window !== 'undefined') {
     const envUrl = import.meta.env.VITE_SERVER_URL;
     if (envUrl) return envUrl;
+
+    // In web mode (not Electron), use relative URL to leverage Vite proxy
+    // This avoids CORS issues since requests appear same-origin
+    if (!window.isElectron) {
+      return '';
+    }
   }
-  return 'http://localhost:3008';
+  // Use VITE_HOSTNAME if set, otherwise default to localhost
+  const hostname = import.meta.env.VITE_HOSTNAME || 'localhost';
+  return `http://${hostname}:3008`;
 };
 
 /**
@@ -75,7 +181,24 @@ let apiKeyInitialized = false;
 let apiKeyInitPromise: Promise<void> | null = null;
 
 // Cached session token for authentication (Web mode - explicit header auth)
+// Persisted to localStorage to survive page reloads
 let cachedSessionToken: string | null = null;
+const SESSION_TOKEN_KEY = 'automaker:sessionToken';
+
+// Initialize cached session token from localStorage on module load
+// This ensures web mode survives page reloads with valid authentication
+const initSessionToken = (): void => {
+  if (typeof window === 'undefined') return; // Skip in SSR
+  try {
+    cachedSessionToken = window.localStorage.getItem(SESSION_TOKEN_KEY);
+  } catch {
+    // localStorage might be disabled or unavailable
+    cachedSessionToken = null;
+  }
+};
+
+// Initialize on module load
+initSessionToken();
 
 // Get API key for Electron mode (returns cached value after initialization)
 // Exported for use in WebSocket connections that need auth
@@ -92,25 +215,80 @@ export const waitForApiKeyInit = (): Promise<void> => {
   return initApiKey();
 };
 
-// Get session token for Web mode (returns cached value after login or token fetch)
+// Get session token for Web mode (returns cached value after login)
 export const getSessionToken = (): string | null => cachedSessionToken;
 
-// Set session token (called after login or token fetch)
+// Set session token (called after login) - persists to localStorage for page reload survival
 export const setSessionToken = (token: string | null): void => {
   cachedSessionToken = token;
+  if (typeof window === 'undefined') return; // Skip in SSR
+  try {
+    if (token) {
+      window.localStorage.setItem(SESSION_TOKEN_KEY, token);
+    } else {
+      window.localStorage.removeItem(SESSION_TOKEN_KEY);
+    }
+  } catch {
+    // localStorage might be disabled; continue with in-memory cache
+  }
 };
 
 // Clear session token (called on logout)
 export const clearSessionToken = (): void => {
   cachedSessionToken = null;
+  if (typeof window === 'undefined') return; // Skip in SSR
+  try {
+    window.localStorage.removeItem(SESSION_TOKEN_KEY);
+  } catch {
+    // localStorage might be disabled
+  }
 };
 
 /**
  * Check if we're running in Electron mode
  */
 export const isElectronMode = (): boolean => {
-  return typeof window !== 'undefined' && !!window.electronAPI?.getApiKey;
+  if (typeof window === 'undefined') return false;
+
+  // Prefer a stable runtime marker from preload.
+  // In some dev/electron setups, method availability can be temporarily undefined
+  // during early startup, but `isElectron` remains reliable.
+  const api = window.electronAPI;
+  return api?.isElectron === true || !!api?.getApiKey;
 };
+
+// Cached external server mode flag
+let cachedExternalServerMode: boolean | null = null;
+
+/**
+ * Check if running in external server mode (Docker API)
+ * In this mode, Electron uses session-based auth like web mode
+ */
+export const checkExternalServerMode = async (): Promise<boolean> => {
+  if (cachedExternalServerMode !== null) {
+    return cachedExternalServerMode;
+  }
+
+  if (typeof window !== 'undefined') {
+    const api = window.electronAPI;
+    if (api?.isExternalServerMode) {
+      try {
+        cachedExternalServerMode = Boolean(await api.isExternalServerMode());
+        return cachedExternalServerMode;
+      } catch (error) {
+        logger.warn('Failed to check external server mode:', error);
+      }
+    }
+  }
+
+  cachedExternalServerMode = false;
+  return false;
+};
+
+/**
+ * Get cached external server mode (synchronous, returns null if not yet checked)
+ */
+export const isExternalServerMode = (): boolean | null => cachedExternalServerMode;
 
 /**
  * Initialize API key and server URL for Electron mode authentication.
@@ -136,16 +314,16 @@ export const initApiKey = async (): Promise<void> => {
         try {
           cachedApiKey = await window.electronAPI.getApiKey();
           if (cachedApiKey) {
-            console.log('[HTTP Client] Using API key from Electron');
+            logger.info('Using API key from Electron');
             return;
           }
         } catch (error) {
-          console.warn('[HTTP Client] Failed to get API key from Electron:', error);
+          logger.warn('Failed to get API key from Electron:', error);
         }
       }
 
       // In web mode, authentication is handled via HTTP-only cookies
-      console.log('[HTTP Client] Web mode - using cookie-based authentication');
+      logger.info('Web mode - using cookie-based authentication');
     } finally {
       // Mark as initialized after completion, regardless of success or failure
       apiKeyInitialized = true;
@@ -166,6 +344,7 @@ export const checkAuthStatus = async (): Promise<{
     const response = await fetch(`${getServerUrl()}/api/auth/status`, {
       credentials: 'include',
       headers: getApiKey() ? { 'X-API-Key': getApiKey()! } : undefined,
+      cache: NO_STORE_CACHE_MODE,
     });
     const data = await response.json();
     return {
@@ -173,7 +352,7 @@ export const checkAuthStatus = async (): Promise<{
       required: data.required ?? true,
     };
   } catch (error) {
-    console.error('[HTTP Client] Failed to check auth status:', error);
+    logger.error('Failed to check auth status:', error);
     return { authenticated: false, required: true };
   }
 };
@@ -192,29 +371,30 @@ export const login = async (
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: JSON.stringify({ apiKey }),
+      cache: NO_STORE_CACHE_MODE,
     });
     const data = await response.json();
 
     // Store the session token if login succeeded
     if (data.success && data.token) {
       setSessionToken(data.token);
-      console.log('[HTTP Client] Session token stored after login');
+      logger.info('Session token stored after login');
 
       // Verify the session is actually working by making a request to an authenticated endpoint
       const verified = await verifySession();
       if (!verified) {
-        console.error('[HTTP Client] Login appeared successful but session verification failed');
+        logger.error('Login appeared successful but session verification failed');
         return {
           success: false,
           error: 'Session verification failed. Please try again.',
         };
       }
-      console.log('[HTTP Client] Login verified successfully');
+      logger.info('Login verified successfully');
     }
 
     return data;
   } catch (error) {
-    console.error('[HTTP Client] Login failed:', error);
+    logger.error('Login failed:', error);
     return { success: false, error: 'Network error' };
   }
 };
@@ -231,23 +411,24 @@ export const fetchSessionToken = async (): Promise<boolean> => {
   try {
     const response = await fetch(`${getServerUrl()}/api/auth/status`, {
       credentials: 'include', // Send the session cookie
+      cache: NO_STORE_CACHE_MODE,
     });
 
     if (!response.ok) {
-      console.log('[HTTP Client] Failed to check auth status');
+      logger.info('Failed to check auth status');
       return false;
     }
 
     const data = await response.json();
     if (data.success && data.authenticated) {
-      console.log('[HTTP Client] Session cookie is valid');
+      logger.info('Session cookie is valid');
       return true;
     }
 
-    console.log('[HTTP Client] Session cookie is not authenticated');
+    logger.info('Session cookie is not authenticated');
     return false;
   } catch (error) {
-    console.error('[HTTP Client] Failed to check session:', error);
+    logger.error('Failed to check session:', error);
     return false;
   }
 };
@@ -259,16 +440,18 @@ export const logout = async (): Promise<{ success: boolean }> => {
   try {
     const response = await fetch(`${getServerUrl()}/api/auth/logout`, {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
+      cache: NO_STORE_CACHE_MODE,
     });
 
     // Clear the cached session token
     clearSessionToken();
-    console.log('[HTTP Client] Session token cleared on logout');
+    logger.info('Session token cleared on logout');
 
     return await response.json();
   } catch (error) {
-    console.error('[HTTP Client] Logout failed:', error);
+    logger.error('Logout failed:', error);
     return { success: false };
   }
 };
@@ -279,50 +462,59 @@ export const logout = async (): Promise<{ success: boolean }> => {
  * This should be called:
  * 1. After login to verify the cookie was set correctly
  * 2. On app load to verify the session hasn't expired
+ *
+ * Returns:
+ * - true: Session is valid
+ * - false: Session is definitively invalid (401/403 auth failure)
+ * - throws: Network error or server not ready (caller should retry)
  */
 export const verifySession = async (): Promise<boolean> => {
-  try {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
 
-    // Add session token header if available
-    const sessionToken = getSessionToken();
-    if (sessionToken) {
-      headers['X-Session-Token'] = sessionToken;
-    }
+  // Electron mode: use API key header
+  const apiKey = getApiKey();
+  if (apiKey) {
+    headers['X-API-Key'] = apiKey;
+  }
 
-    // Make a request to an authenticated endpoint to verify the session
-    // We use /api/settings/status as it requires authentication and is lightweight
-    const response = await fetch(`${getServerUrl()}/api/settings/status`, {
-      headers,
-      credentials: 'include',
-    });
+  // Add session token header if available (web mode)
+  const sessionToken = getSessionToken();
+  if (sessionToken) {
+    headers['X-Session-Token'] = sessionToken;
+  }
 
-    // Check for authentication errors
-    if (response.status === 401 || response.status === 403) {
-      console.warn('[HTTP Client] Session verification failed - session expired or invalid');
-      // Clear the session since it's no longer valid
-      clearSessionToken();
-      // Try to clear the cookie via logout (fire and forget)
-      fetch(`${getServerUrl()}/api/auth/logout`, {
-        method: 'POST',
-        credentials: 'include',
-      }).catch(() => {});
-      return false;
-    }
+  // Make a request to an authenticated endpoint to verify the session
+  // We use /api/settings/status as it requires authentication and is lightweight
+  // Note: fetch throws on network errors, which we intentionally let propagate
+  const response = await fetch(`${getServerUrl()}/api/settings/status`, {
+    headers,
+    credentials: 'include',
+    cache: NO_STORE_CACHE_MODE,
+    // Avoid hanging indefinitely during backend reloads or network issues
+    signal: AbortSignal.timeout(2500),
+  });
 
-    if (!response.ok) {
-      console.warn('[HTTP Client] Session verification failed with status:', response.status);
-      return false;
-    }
-
-    console.log('[HTTP Client] Session verified successfully');
-    return true;
-  } catch (error) {
-    console.error('[HTTP Client] Session verification error:', error);
+  // Check for authentication errors - these are definitive "invalid session" responses
+  if (response.status === 401 || response.status === 403) {
+    logger.warn('Session verification failed - session expired or invalid');
+    // Clear the in-memory/localStorage session token since it's no longer valid
+    // Note: We do NOT call logout here - that would destroy a potentially valid
+    // cookie if the issue was transient (e.g., token not sent due to timing)
+    clearSessionToken();
     return false;
   }
+
+  // For other non-ok responses (5xx, etc.), throw to trigger retry
+  if (!response.ok) {
+    const error = new Error(`Session verification failed with status: ${response.status}`);
+    logger.warn('Session verification failed with status:', response.status);
+    throw error;
+  }
+
+  logger.info('Session verified successfully');
+  return true;
 };
 
 /**
@@ -331,22 +523,28 @@ export const verifySession = async (): Promise<boolean> => {
  */
 export const checkSandboxEnvironment = async (): Promise<{
   isContainerized: boolean;
+  skipSandboxWarning?: boolean;
   error?: string;
 }> => {
   try {
     const response = await fetch(`${getServerUrl()}/api/health/environment`, {
       method: 'GET',
+      cache: NO_STORE_CACHE_MODE,
+      signal: AbortSignal.timeout(5000),
     });
 
     if (!response.ok) {
-      console.warn('[HTTP Client] Failed to check sandbox environment');
+      logger.warn('Failed to check sandbox environment');
       return { isContainerized: false, error: 'Failed to check environment' };
     }
 
     const data = await response.json();
-    return { isContainerized: data.isContainerized ?? false };
+    return {
+      isContainerized: data.isContainerized ?? false,
+      skipSandboxWarning: data.skipSandboxWarning ?? false,
+    };
   } catch (error) {
-    console.error('[HTTP Client] Sandbox environment check failed:', error);
+    logger.error('Sandbox environment check failed:', error);
     return { isContainerized: false, error: 'Network error' };
   }
 };
@@ -354,9 +552,123 @@ export const checkSandboxEnvironment = async (): Promise<{
 type EventType =
   | 'agent:stream'
   | 'auto-mode:event'
-  | 'suggestions:event'
   | 'spec-regeneration:event'
-  | 'issue-validation:event';
+  | 'issue-validation:event'
+  | 'backlog-plan:event'
+  | 'ideation:stream'
+  | 'ideation:analysis'
+  | 'worktree:init-started'
+  | 'worktree:init-output'
+  | 'worktree:init-completed'
+  | 'dev-server:started'
+  | 'dev-server:output'
+  | 'dev-server:stopped'
+  | 'test-runner:started'
+  | 'test-runner:output'
+  | 'test-runner:completed'
+  | 'notification:created';
+
+/**
+ * Dev server log event payloads for WebSocket streaming
+ */
+export interface DevServerStartedEvent {
+  worktreePath: string;
+  port: number;
+  url: string;
+  timestamp: string;
+}
+
+export interface DevServerOutputEvent {
+  worktreePath: string;
+  content: string;
+  timestamp: string;
+}
+
+export interface DevServerStoppedEvent {
+  worktreePath: string;
+  port: number;
+  exitCode: number | null;
+  error?: string;
+  timestamp: string;
+}
+
+export type DevServerLogEvent =
+  | { type: 'dev-server:started'; payload: DevServerStartedEvent }
+  | { type: 'dev-server:output'; payload: DevServerOutputEvent }
+  | { type: 'dev-server:stopped'; payload: DevServerStoppedEvent };
+
+/**
+ * Test runner event payloads for WebSocket streaming
+ */
+export type TestRunStatus = 'pending' | 'running' | 'passed' | 'failed' | 'cancelled' | 'error';
+
+export interface TestRunnerStartedEvent {
+  sessionId: string;
+  worktreePath: string;
+  /** The test command being run (from project settings) */
+  command: string;
+  testFile?: string;
+  timestamp: string;
+}
+
+export interface TestRunnerOutputEvent {
+  sessionId: string;
+  worktreePath: string;
+  content: string;
+  timestamp: string;
+}
+
+export interface TestRunnerCompletedEvent {
+  sessionId: string;
+  worktreePath: string;
+  /** The test command that was run */
+  command: string;
+  status: TestRunStatus;
+  testFile?: string;
+  exitCode: number | null;
+  duration: number;
+  timestamp: string;
+}
+
+export type TestRunnerEvent =
+  | { type: 'test-runner:started'; payload: TestRunnerStartedEvent }
+  | { type: 'test-runner:output'; payload: TestRunnerOutputEvent }
+  | { type: 'test-runner:completed'; payload: TestRunnerCompletedEvent };
+
+/**
+ * Response type for fetching dev server logs
+ */
+export interface DevServerLogsResponse {
+  success: boolean;
+  result?: {
+    worktreePath: string;
+    port: number;
+    url: string;
+    logs: string;
+    startedAt: string;
+  };
+  error?: string;
+}
+
+/**
+ * Response type for fetching test logs
+ */
+export interface TestLogsResponse {
+  success: boolean;
+  result?: {
+    sessionId: string;
+    worktreePath: string;
+    /** The test command that was/is being run */
+    command: string;
+    status: TestRunStatus;
+    testFile?: string;
+    logs: string;
+    startedAt: string;
+    finishedAt: string | null;
+    exitCode: number | null;
+  };
+  error?: string;
+}
 
 type EventCallback = (payload: unknown) => void;
 
@@ -378,17 +690,20 @@ export class HttpApiClient implements ElectronAPI {
 
   constructor() {
     this.serverUrl = getServerUrl();
-    // Wait for API key initialization before connecting WebSocket
-    // This prevents 401 errors on startup in Electron mode
-    waitForApiKeyInit()
-      .then(() => {
-        this.connectWebSocket();
-      })
-      .catch((error) => {
-        console.error('[HttpApiClient] API key initialization failed:', error);
-        // Still attempt WebSocket connection - it may work with cookie auth
-        this.connectWebSocket();
-      });
+    // Electron mode: connect WebSocket immediately once API key is ready.
+    // Web mode: defer WebSocket connection until a consumer subscribes to events,
+    // to avoid noisy 401s on first-load/login/setup routes.
+    if (isElectronMode()) {
+      waitForApiKeyInit()
+        .then(() => {
+          this.connectWebSocket();
+        })
+        .catch((error) => {
+          logger.error('API key initialization failed:', error);
+          // Still attempt WebSocket connection - it may work with cookie auth
+          this.connectWebSocket();
+        });
+    }
   }
 
   /**
@@ -410,10 +725,16 @@ export class HttpApiClient implements ElectronAPI {
       const response = await fetch(`${this.serverUrl}/api/auth/token`, {
         headers,
         credentials: 'include',
+        cache: NO_STORE_CACHE_MODE,
       });
 
+      if (response.status === 401 || response.status === 403) {
+        handleUnauthorized();
+        return null;
+      }
+
       if (!response.ok) {
-        console.warn('[HttpApiClient] Failed to fetch wsToken:', response.status);
+        logger.warn('Failed to fetch wsToken:', response.status);
         return null;
       }
 
@@ -424,7 +745,7 @@ export class HttpApiClient implements ElectronAPI {
 
       return null;
     } catch (error) {
-      console.error('[HttpApiClient] Error fetching wsToken:', error);
+      logger.error('Error fetching wsToken:', error);
       return null;
     }
   }
@@ -436,9 +757,43 @@ export class HttpApiClient implements ElectronAPI {
 
     this.isConnecting = true;
 
-    // In Electron mode, use API key directly
-    const apiKey = getApiKey();
-    if (apiKey) {
+    // Wait for API key initialization to complete before attempting connection
+    // This prevents race conditions during app startup
+    waitForApiKeyInit()
+      .then(() => this.doConnectWebSocketInternal())
+      .catch((error) => {
+        logger.error('Failed to initialize for WebSocket connection:', error);
+        this.isConnecting = false;
+      });
+  }
+
+  private doConnectWebSocketInternal(): void {
+    // Electron mode typically authenticates with the injected API key.
+    // However, in external-server/cookie-auth flows, the API key may be unavailable.
+    // In that case, fall back to the same wsToken/cookie authentication used in web mode
+    // so the UI still receives real-time events (running tasks, logs, etc.).
+    if (isElectronMode()) {
+      const apiKey = getApiKey();
+      if (!apiKey) {
+        logger.warn('Electron mode: API key missing, attempting wsToken/cookie auth for WebSocket');
+        this.fetchWsToken()
+          .then((wsToken) => {
+            const wsUrl = this.serverUrl.replace(/^http/, 'ws') + '/api/events';
+            if (wsToken) {
+              this.establishWebSocket(`${wsUrl}?wsToken=${encodeURIComponent(wsToken)}`);
+            } else {
+              // Fallback: try connecting without token (will fail if not authenticated)
+              logger.warn('No wsToken available, attempting WebSocket connection anyway');
+              this.establishWebSocket(wsUrl);
+            }
+          })
+          .catch((error) => {
+            logger.error('Failed to prepare WebSocket connection (electron fallback):', error);
+            this.isConnecting = false;
+          });
+        return;
+      }
+
       const wsUrl = this.serverUrl.replace(/^http/, 'ws') + '/api/events';
       this.establishWebSocket(`${wsUrl}?apiKey=${encodeURIComponent(apiKey)}`);
       return;
@@ -452,12 +807,12 @@ export class HttpApiClient implements ElectronAPI {
           this.establishWebSocket(`${wsUrl}?wsToken=${encodeURIComponent(wsToken)}`);
         } else {
           // Fallback: try connecting without token (will fail if not authenticated)
-          console.warn('[HttpApiClient] No wsToken available, attempting connection anyway');
+          logger.warn('No wsToken available, attempting connection anyway');
           this.establishWebSocket(wsUrl);
         }
       })
       .catch((error) => {
-        console.error('[HttpApiClient] Failed to prepare WebSocket connection:', error);
+        logger.error('Failed to prepare WebSocket connection:', error);
         this.isConnecting = false;
       });
   }
@@ -470,7 +825,7 @@ export class HttpApiClient implements ElectronAPI {
       this.ws = new WebSocket(wsUrl);
 
       this.ws.onopen = () => {
-        console.log('[HttpApiClient] WebSocket connected');
+        logger.info('WebSocket connected');
         this.isConnecting = false;
         if (this.reconnectTimer) {
           clearTimeout(this.reconnectTimer);
@@ -481,8 +836,8 @@ export class HttpApiClient implements ElectronAPI {
       this.ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          console.log(
-            '[HttpApiClient] WebSocket message:',
+          logger.info(
+            'WebSocket message:',
             data.type,
             'hasPayload:',
             !!data.payload,
@@ -491,16 +846,16 @@ export class HttpApiClient implements ElectronAPI {
           );
           const callbacks = this.eventCallbacks.get(data.type);
           if (callbacks) {
-            console.log('[HttpApiClient] Dispatching to', callbacks.size, 'callbacks');
+            logger.info('Dispatching to', callbacks.size, 'callbacks');
             callbacks.forEach((cb) => cb(data.payload));
           }
         } catch (error) {
-          console.error('[HttpApiClient] Failed to parse WebSocket message:', error);
+          logger.error('Failed to parse WebSocket message:', error);
         }
       };
 
       this.ws.onclose = () => {
-        console.log('[HttpApiClient] WebSocket disconnected');
+        logger.info('WebSocket disconnected');
         this.isConnecting = false;
         this.ws = null;
         // Attempt to reconnect after 5 seconds
@@ -513,11 +868,11 @@ export class HttpApiClient implements ElectronAPI {
       };
 
       this.ws.onerror = (error) => {
-        console.error('[HttpApiClient] WebSocket error:', error);
+        logger.error('WebSocket error:', error);
         this.isConnecting = false;
       };
     } catch (error) {
-      console.error('[HttpApiClient] Failed to create WebSocket:', error);
+      logger.error('Failed to create WebSocket:', error);
       this.isConnecting = false;
     }
   }
@@ -570,6 +925,11 @@ export class HttpApiClient implements ElectronAPI {
       body: body ? JSON.stringify(body) : undefined,
     });
 
+    if (response.status === 401 || response.status === 403) {
+      handleUnauthorized();
+      throw new Error('Unauthorized');
+    }
+
     if (!response.ok) {
       let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
       try {
@@ -586,13 +946,19 @@ export class HttpApiClient implements ElectronAPI {
     return response.json();
   }
 
-  private async get<T>(endpoint: string): Promise<T> {
+  async get<T>(endpoint: string): Promise<T> {
     // Ensure API key is initialized before making request
     await waitForApiKeyInit();
     const response = await fetch(`${this.serverUrl}${endpoint}`, {
       headers: this.getHeaders(),
       credentials: 'include', // Include cookies for session auth
+      cache: NO_STORE_CACHE_MODE,
     });
+
+    if (response.status === 401 || response.status === 403) {
+      handleUnauthorized();
+      throw new Error('Unauthorized');
+    }
 
     if (!response.ok) {
       let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
@@ -610,7 +976,7 @@ export class HttpApiClient implements ElectronAPI {
     return response.json();
   }
 
-  private async put<T>(endpoint: string, body?: unknown): Promise<T> {
+  async put<T>(endpoint: string, body?: unknown): Promise<T> {
     // Ensure API key is initialized before making request
     await waitForApiKeyInit();
     const response = await fetch(`${this.serverUrl}${endpoint}`, {
@@ -620,6 +986,11 @@ export class HttpApiClient implements ElectronAPI {
       body: body ? JSON.stringify(body) : undefined,
     });
 
+    if (response.status === 401 || response.status === 403) {
+      handleUnauthorized();
+      throw new Error('Unauthorized');
+    }
+
     if (!response.ok) {
       let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
       try {
@@ -636,14 +1007,20 @@ export class HttpApiClient implements ElectronAPI {
     return response.json();
   }
 
-  private async httpDelete<T>(endpoint: string): Promise<T> {
+  private async httpDelete<T>(endpoint: string, body?: unknown): Promise<T> {
     // Ensure API key is initialized before making request
     await waitForApiKeyInit();
     const response = await fetch(`${this.serverUrl}${endpoint}`, {
       method: 'DELETE',
       headers: this.getHeaders(),
       credentials: 'include', // Include cookies for session auth
+      body: body ? JSON.stringify(body) : undefined,
     });
+
+    if (response.status === 401 || response.status === 403) {
+      handleUnauthorized();
+      throw new Error('Unauthorized');
+    }
 
     if (!response.ok) {
       let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
@@ -717,7 +1094,7 @@ export class HttpApiClient implements ElectronAPI {
     const fileBrowser = getGlobalFileBrowser();
 
     if (!fileBrowser) {
-      console.error('File browser not initialized');
+      logger.error('File browser not initialized');
       return { canceled: true, filePaths: [] };
     }
 
@@ -739,7 +1116,7 @@ export class HttpApiClient implements ElectronAPI {
       return { canceled: false, filePaths: [result.path] };
     }
 
-    console.error('Invalid directory:', result.error || 'Path not allowed');
+    logger.error('Invalid directory:', result.error || 'Path not allowed');
     return { canceled: true, filePaths: [] };
   }
 
@@ -747,7 +1124,7 @@ export class HttpApiClient implements ElectronAPI {
     const fileBrowser = getGlobalFileBrowser();
 
     if (!fileBrowser) {
-      console.error('File browser not initialized');
+      logger.error('File browser not initialized');
       return { canceled: true, filePaths: [] };
     }
 
@@ -766,7 +1143,7 @@ export class HttpApiClient implements ElectronAPI {
       return { canceled: false, filePaths: [path] };
     }
 
-    console.error('File not found');
+    logger.error('File not found');
     return { canceled: true, filePaths: [] };
   }
 
@@ -926,6 +1303,14 @@ export class HttpApiClient implements ElectronAPI {
       output?: string;
     }> => this.post('/api/setup/auth-claude'),
 
+    deauthClaude: (): Promise<{
+      success: boolean;
+      requiresManualDeauth?: boolean;
+      command?: string;
+      message?: string;
+      error?: string;
+    }> => this.post('/api/setup/deauth-claude'),
+
     storeApiKey: (
       provider: string,
       apiKey: string
@@ -946,6 +1331,7 @@ export class HttpApiClient implements ElectronAPI {
       success: boolean;
       hasAnthropicKey: boolean;
       hasGoogleKey: boolean;
+      hasOpenaiKey: boolean;
     }> => this.get('/api/setup/api-keys'),
 
     getPlatform: (): Promise<{
@@ -959,12 +1345,13 @@ export class HttpApiClient implements ElectronAPI {
     }> => this.get('/api/setup/platform'),
 
     verifyClaudeAuth: (
-      authMethod?: 'cli' | 'api_key'
+      authMethod?: 'cli' | 'api_key',
+      apiKey?: string
     ): Promise<{
       success: boolean;
       authenticated: boolean;
       error?: string;
-    }> => this.post('/api/setup/verify-claude-auth', { authMethod }),
+    }> => this.post('/api/setup/verify-claude-auth', { authMethod, apiKey }),
 
     getGhStatus: (): Promise<{
       success: boolean;
@@ -976,39 +1363,562 @@ export class HttpApiClient implements ElectronAPI {
       error?: string;
     }> => this.get('/api/setup/gh-status'),
 
-    onInstallProgress: (callback: (progress: unknown) => void) => {
-      return this.subscribeToEvent('agent:stream', callback);
+    // Cursor CLI methods
+    getCursorStatus: (): Promise<{
+      success: boolean;
+      installed?: boolean;
+      version?: string | null;
+      path?: string | null;
+      auth?: {
+        authenticated: boolean;
+        method: string;
+      };
+      installCommand?: string;
+      loginCommand?: string;
+      error?: string;
+    }> => this.get('/api/setup/cursor-status'),
+
+    authCursor: (): Promise<{
+      success: boolean;
+      token?: string;
+      requiresManualAuth?: boolean;
+      terminalOpened?: boolean;
+      command?: string;
+      message?: string;
+      output?: string;
+    }> => this.post('/api/setup/auth-cursor'),
+
+    deauthCursor: (): Promise<{
+      success: boolean;
+      requiresManualDeauth?: boolean;
+      command?: string;
+      message?: string;
+      error?: string;
+    }> => this.post('/api/setup/deauth-cursor'),
+
+    authOpencode: (): Promise<{
+      success: boolean;
+      token?: string;
+      requiresManualAuth?: boolean;
+      terminalOpened?: boolean;
+      command?: string;
+      message?: string;
+      output?: string;
+    }> => this.post('/api/setup/auth-opencode'),
+
+    deauthOpencode: (): Promise<{
+      success: boolean;
+      requiresManualDeauth?: boolean;
+      command?: string;
+      message?: string;
+      error?: string;
+    }> => this.post('/api/setup/deauth-opencode'),
+
+    getCursorConfig: (
+      projectPath: string
+    ): Promise<{
+      success: boolean;
+      config?: {
+        defaultModel?: string;
+        models?: string[];
+        mcpServers?: string[];
+        rules?: string[];
+      };
+      availableModels?: Array<{
+        id: string;
+        label: string;
+        description: string;
+        hasThinking: boolean;
+        tier: 'free' | 'pro';
+      }>;
+      error?: string;
+    }> => this.get(`/api/setup/cursor-config?projectPath=${encodeURIComponent(projectPath)}`),
+
+    setCursorDefaultModel: (
+      projectPath: string,
+      model: string
+    ): Promise<{
+      success: boolean;
+      model?: string;
+      error?: string;
+    }> => this.post('/api/setup/cursor-config/default-model', { projectPath, model }),
+
+    setCursorModels: (
+      projectPath: string,
+      models: string[]
+    ): Promise<{
+      success: boolean;
+      models?: string[];
+      error?: string;
+    }> => this.post('/api/setup/cursor-config/models', { projectPath, models }),
+
+    // Cursor CLI Permissions
+    getCursorPermissions: (
+      projectPath?: string
+    ): Promise<{
+      success: boolean;
+      globalPermissions?: { allow: string[]; deny: string[] } | null;
+      projectPermissions?: { allow: string[]; deny: string[] } | null;
+      effectivePermissions?: { allow: string[]; deny: string[] } | null;
+      activeProfile?: 'strict' | 'development' | 'custom' | null;
+      hasProjectConfig?: boolean;
+      availableProfiles?: Array<{
+        id: string;
+        name: string;
+        description: string;
+        permissions: { allow: string[]; deny: string[] };
+      }>;
+      error?: string;
+    }> =>
+      this.get(
+        `/api/setup/cursor-permissions${projectPath ? `?projectPath=${encodeURIComponent(projectPath)}` : ''}`
+      ),
+
+    applyCursorPermissionProfile: (
+      profileId: 'strict' | 'development',
+      scope: 'global' | 'project',
+      projectPath?: string
+    ): Promise<{
+      success: boolean;
+      message?: string;
+      scope?: string;
+      profileId?: string;
+      error?: string;
+    }> => this.post('/api/setup/cursor-permissions/profile', { profileId, scope, projectPath }),
+
+    setCursorCustomPermissions: (
+      projectPath: string,
+      permissions: { allow: string[]; deny: string[] }
+    ): Promise<{
+      success: boolean;
+      message?: string;
+      permissions?: { allow: string[]; deny: string[] };
+      error?: string;
+    }> => this.post('/api/setup/cursor-permissions/custom', { projectPath, permissions }),
+
+    deleteCursorProjectPermissions: (
+      projectPath: string
+    ): Promise<{
+      success: boolean;
+      message?: string;
+      error?: string;
+    }> =>
+      this.httpDelete(
+        `/api/setup/cursor-permissions?projectPath=${encodeURIComponent(projectPath)}`
+      ),
+
+    getCursorExampleConfig: (
+      profileId?: 'strict' | 'development'
+    ): Promise<{
+      success: boolean;
+      profileId?: string;
+      config?: string;
+      error?: string;
+    }> =>
+      this.get(
+        `/api/setup/cursor-permissions/example${profileId ? `?profileId=${profileId}` : ''}`
+      ),
+
+    // Codex CLI methods
+    getCodexStatus: (): Promise<{
+      success: boolean;
+      status?: string;
+      installed?: boolean;
+      method?: string;
+      version?: string;
+      path?: string;
+      auth?: {
+        authenticated: boolean;
+        method: string;
+        hasAuthFile?: boolean;
+        hasOAuthToken?: boolean;
+        hasApiKey?: boolean;
+        hasStoredApiKey?: boolean;
+        hasEnvApiKey?: boolean;
+      };
+      error?: string;
+    }> => this.get('/api/setup/codex-status'),
+
+    installCodex: (): Promise<{
+      success: boolean;
+      message?: string;
+      error?: string;
+    }> => this.post('/api/setup/install-codex'),
+
+    authCodex: (): Promise<{
+      success: boolean;
+      token?: string;
+      requiresManualAuth?: boolean;
+      terminalOpened?: boolean;
+      command?: string;
+      error?: string;
+      message?: string;
+      output?: string;
+    }> => this.post('/api/setup/auth-codex'),
+
+    deauthCodex: (): Promise<{
+      success: boolean;
+      requiresManualDeauth?: boolean;
+      command?: string;
+      message?: string;
+      error?: string;
+    }> => this.post('/api/setup/deauth-codex'),
+
+    verifyCodexAuth: (
+      authMethod: 'cli' | 'api_key',
+      apiKey?: string
+    ): Promise<{
+      success: boolean;
+      authenticated: boolean;
+      error?: string;
+    }> => this.post('/api/setup/verify-codex-auth', { authMethod, apiKey }),
+
+    // OpenCode CLI methods
+    getOpencodeStatus: (): Promise<{
+      success: boolean;
+      status?: string;
+      installed?: boolean;
+      method?: string;
+      version?: string;
+      path?: string;
+      recommendation?: string;
+      installCommands?: {
+        macos?: string;
+        linux?: string;
+        npm?: string;
+      };
+      auth?: {
+        authenticated: boolean;
+        method: string;
+        hasAuthFile?: boolean;
+        hasOAuthToken?: boolean;
+        hasApiKey?: boolean;
+        hasStoredApiKey?: boolean;
+        hasEnvApiKey?: boolean;
+      };
+      error?: string;
+    }> => this.get('/api/setup/opencode-status'),
+
+    // OpenCode Dynamic Model Discovery
+    getOpencodeModels: (
+      refresh?: boolean
+    ): Promise<{
+      success: boolean;
+      models?: Array<{
+        id: string;
+        name: string;
+        modelString: string;
+        provider: string;
+        description: string;
+        supportsTools: boolean;
+        supportsVision: boolean;
+        tier: string;
+        default?: boolean;
+      }>;
+      count?: number;
+      cached?: boolean;
+      error?: string;
+    }> => this.get(`/api/setup/opencode/models${refresh ? '?refresh=true' : ''}`),
+
+    refreshOpencodeModels: (): Promise<{
+      success: boolean;
+      models?: Array<{
+        id: string;
+        name: string;
+        modelString: string;
+        provider: string;
+        description: string;
+        supportsTools: boolean;
+        supportsVision: boolean;
+        tier: string;
+        default?: boolean;
+      }>;
+      count?: number;
+      error?: string;
+    }> => this.post('/api/setup/opencode/models/refresh'),
+
+    getOpencodeProviders: (): Promise<{
+      success: boolean;
+      providers?: Array<{
+        id: string;
+        name: string;
+        authenticated: boolean;
+        authMethod?: 'oauth' | 'api_key';
+      }>;
+      authenticated?: Array<{
+        id: string;
+        name: string;
+        authenticated: boolean;
+        authMethod?: 'oauth' | 'api_key';
+      }>;
+      error?: string;
+    }> => this.get('/api/setup/opencode/providers'),
+
+    clearOpencodeCache: (): Promise<{
+      success: boolean;
+      message?: string;
+      error?: string;
+    }> => this.post('/api/setup/opencode/cache/clear'),
+
+    // Gemini CLI methods
+    getGeminiStatus: (): Promise<{
+      success: boolean;
+      status?: string;
+      installed?: boolean;
+      method?: string;
+      version?: string;
+      path?: string;
+      recommendation?: string;
+      installCommands?: {
+        macos?: string;
+        linux?: string;
+        npm?: string;
+      };
+      auth?: {
+        authenticated: boolean;
+        method: string;
+        hasApiKey?: boolean;
+        hasEnvApiKey?: boolean;
+        error?: string;
+      };
+      loginCommand?: string;
+      installCommand?: string;
+      error?: string;
+    }> => this.get('/api/setup/gemini-status'),
+
+    authGemini: (): Promise<{
+      success: boolean;
+      requiresManualAuth?: boolean;
+      command?: string;
+      message?: string;
+      error?: string;
+    }> => this.post('/api/setup/auth-gemini'),
+
+    deauthGemini: (): Promise<{
+      success: boolean;
+      requiresManualDeauth?: boolean;
+      command?: string;
+      message?: string;
+      error?: string;
+    }> => this.post('/api/setup/deauth-gemini'),
+
+    // Copilot SDK methods
+    getCopilotStatus: (): Promise<{
+      success: boolean;
+      status?: string;
+      installed?: boolean;
+      method?: string;
+      version?: string;
+      path?: string;
+      recommendation?: string;
+      auth?: {
+        authenticated: boolean;
+        method: string;
+        login?: string;
+        host?: string;
+        error?: string;
+      };
+      loginCommand?: string;
+      installCommand?: string;
+      error?: string;
+    }> => this.get('/api/setup/copilot-status'),
+
+    onInstallProgress: (
+      callback: (progress: { cli?: string; data?: string; type?: string }) => void
+    ) => {
+      return this.subscribeToEvent('agent:stream', callback as EventCallback);
     },
 
-    onAuthProgress: (callback: (progress: unknown) => void) => {
-      return this.subscribeToEvent('agent:stream', callback);
+    onAuthProgress: (
+      callback: (progress: { cli?: string; data?: string; type?: string }) => void
+    ) => {
+      return this.subscribeToEvent('agent:stream', callback as EventCallback);
     },
   };
 
   // Features API
-  features: FeaturesAPI = {
+  features: FeaturesAPI & {
+    bulkUpdate: (
+      projectPath: string,
+      featureIds: string[],
+      updates: Partial<Feature>
+    ) => Promise<{
+      success: boolean;
+      updatedCount?: number;
+      failedCount?: number;
+      results?: Array<{ featureId: string; success: boolean; error?: string }>;
+      features?: Feature[];
+      error?: string;
+    }>;
+    bulkDelete: (
+      projectPath: string,
+      featureIds: string[]
+    ) => Promise<{
+      success: boolean;
+      deletedCount?: number;
+      failedCount?: number;
+      results?: Array<{ featureId: string; success: boolean; error?: string }>;
+      error?: string;
+    }>;
+    export: (
+      projectPath: string,
+      options?: {
+        featureIds?: string[];
+        format?: 'json' | 'yaml';
+        includeHistory?: boolean;
+        includePlanSpec?: boolean;
+        category?: string;
+        status?: string;
+        prettyPrint?: boolean;
+        metadata?: Record<string, unknown>;
+      }
+    ) => Promise<{
+      success: boolean;
+      data?: string;
+      format?: 'json' | 'yaml';
+      contentType?: string;
+      filename?: string;
+      error?: string;
+    }>;
+    import: (
+      projectPath: string,
+      data: string,
+      options?: {
+        overwrite?: boolean;
+        preserveBranchInfo?: boolean;
+        targetCategory?: string;
+      }
+    ) => Promise<{
+      success: boolean;
+      importedCount?: number;
+      failedCount?: number;
+      results?: Array<{
+        success: boolean;
+        featureId?: string;
+        importedAt: string;
+        warnings?: string[];
+        errors?: string[];
+        wasOverwritten?: boolean;
+      }>;
+      error?: string;
+    }>;
+    checkConflicts: (
+      projectPath: string,
+      data: string
+    ) => Promise<{
+      success: boolean;
+      hasConflicts?: boolean;
+      conflicts?: Array<{
+        featureId: string;
+        title?: string;
+        existingTitle?: string;
+        hasConflict: boolean;
+      }>;
+      totalFeatures?: number;
+      conflictCount?: number;
+      error?: string;
+    }>;
+  } = {
     getAll: (projectPath: string) => this.post('/api/features/list', { projectPath }),
     get: (projectPath: string, featureId: string) =>
       this.post('/api/features/get', { projectPath, featureId }),
     create: (projectPath: string, feature: Feature) =>
       this.post('/api/features/create', { projectPath, feature }),
-    update: (projectPath: string, featureId: string, updates: Partial<Feature>) =>
-      this.post('/api/features/update', { projectPath, featureId, updates }),
+    update: (
+      projectPath: string,
+      featureId: string,
+      updates: Partial<Feature>,
+      descriptionHistorySource?: 'enhance' | 'edit',
+      enhancementMode?: 'improve' | 'technical' | 'simplify' | 'acceptance' | 'ux-reviewer',
+      preEnhancementDescription?: string
+    ) =>
+      this.post('/api/features/update', {
+        projectPath,
+        featureId,
+        updates,
+        descriptionHistorySource,
+        enhancementMode,
+        preEnhancementDescription,
+      }),
     delete: (projectPath: string, featureId: string) =>
       this.post('/api/features/delete', { projectPath, featureId }),
     getAgentOutput: (projectPath: string, featureId: string) =>
       this.post('/api/features/agent-output', { projectPath, featureId }),
-    generateTitle: (description: string) =>
-      this.post('/api/features/generate-title', { description }),
+    generateTitle: (description: string, projectPath?: string) =>
+      this.post('/api/features/generate-title', { description, projectPath }),
+    bulkUpdate: (projectPath: string, featureIds: string[], updates: Partial<Feature>) =>
+      this.post('/api/features/bulk-update', { projectPath, featureIds, updates }),
+    bulkDelete: (projectPath: string, featureIds: string[]) =>
+      this.post('/api/features/bulk-delete', { projectPath, featureIds }),
+    export: (
+      projectPath: string,
+      options?: {
+        featureIds?: string[];
+        format?: 'json' | 'yaml';
+        includeHistory?: boolean;
+        includePlanSpec?: boolean;
+        category?: string;
+        status?: string;
+        prettyPrint?: boolean;
+        metadata?: Record<string, unknown>;
+      }
+    ): Promise<{
+      success: boolean;
+      data?: string;
+      format?: 'json' | 'yaml';
+      contentType?: string;
+      filename?: string;
+      error?: string;
+    }> => this.post('/api/features/export', { projectPath, ...options }),
+    import: (
+      projectPath: string,
+      data: string,
+      options?: {
+        overwrite?: boolean;
+        preserveBranchInfo?: boolean;
+        targetCategory?: string;
+      }
+    ): Promise<{
+      success: boolean;
+      importedCount?: number;
+      failedCount?: number;
+      results?: Array<{
+        success: boolean;
+        featureId?: string;
+        importedAt: string;
+        warnings?: string[];
+        errors?: string[];
+        wasOverwritten?: boolean;
+      }>;
+      error?: string;
+    }> => this.post('/api/features/import', { projectPath, data, ...options }),
+    checkConflicts: (
+      projectPath: string,
+      data: string
+    ): Promise<{
+      success: boolean;
+      hasConflicts?: boolean;
+      conflicts?: Array<{
+        featureId: string;
+        title?: string;
+        existingTitle?: string;
+        hasConflict: boolean;
+      }>;
+      totalFeatures?: number;
+      conflictCount?: number;
+      error?: string;
+    }> => this.post('/api/features/check-conflicts', { projectPath, data }),
   };
 
   // Auto Mode API
   autoMode: AutoModeAPI = {
-    start: (projectPath: string, maxConcurrency?: number) =>
-      this.post('/api/auto-mode/start', { projectPath, maxConcurrency }),
-    stop: (projectPath: string) => this.post('/api/auto-mode/stop', { projectPath }),
+    start: (projectPath: string, branchName?: string | null, maxConcurrency?: number) =>
+      this.post('/api/auto-mode/start', { projectPath, branchName, maxConcurrency }),
+    stop: (projectPath: string, branchName?: string | null) =>
+      this.post('/api/auto-mode/stop', { projectPath, branchName }),
     stopFeature: (featureId: string) => this.post('/api/auto-mode/stop-feature', { featureId }),
-    status: (projectPath?: string) => this.post('/api/auto-mode/status', { projectPath }),
+    status: (projectPath?: string, branchName?: string | null) =>
+      this.post('/api/auto-mode/status', { projectPath, branchName }),
     runFeature: (
       projectPath: string,
       featureId: string,
@@ -1038,14 +1948,14 @@ export class HttpApiClient implements ElectronAPI {
       featureId: string,
       prompt: string,
       imagePaths?: string[],
-      worktreePath?: string
+      useWorktrees?: boolean
     ) =>
       this.post('/api/auto-mode/follow-up-feature', {
         projectPath,
         featureId,
         prompt,
         imagePaths,
-        worktreePath,
+        useWorktrees,
       }),
     commitFeature: (projectPath: string, featureId: string, worktreePath?: string) =>
       this.post('/api/auto-mode/commit-feature', {
@@ -1067,6 +1977,8 @@ export class HttpApiClient implements ElectronAPI {
         editedPlan,
         feedback,
       }),
+    resumeInterrupted: (projectPath: string) =>
+      this.post('/api/auto-mode/resume-interrupted', { projectPath }),
     onEvent: (callback: (event: AutoModeEvent) => void) => {
       return this.subscribeToEvent('auto-mode:event', callback as EventCallback);
     },
@@ -1077,26 +1989,42 @@ export class HttpApiClient implements ElectronAPI {
     enhance: (
       originalText: string,
       enhancementMode: string,
-      model?: string
+      model?: string,
+      thinkingLevel?: string,
+      projectPath?: string
     ): Promise<EnhancePromptResult> =>
       this.post('/api/enhance-prompt', {
         originalText,
         enhancementMode,
         model,
+        thinkingLevel,
+        projectPath,
       }),
   };
 
   // Worktree API
   worktree: WorktreeAPI = {
-    mergeFeature: (projectPath: string, featureId: string, options?: object) =>
-      this.post('/api/worktree/merge', { projectPath, featureId, options }),
+    mergeFeature: (
+      projectPath: string,
+      branchName: string,
+      worktreePath: string,
+      targetBranch?: string,
+      options?: object
+    ) =>
+      this.post('/api/worktree/merge', {
+        projectPath,
+        branchName,
+        worktreePath,
+        targetBranch,
+        options,
+      }),
     getInfo: (projectPath: string, featureId: string) =>
       this.post('/api/worktree/info', { projectPath, featureId }),
     getStatus: (projectPath: string, featureId: string) =>
       this.post('/api/worktree/status', { projectPath, featureId }),
     list: (projectPath: string) => this.post('/api/worktree/list', { projectPath }),
-    listAll: (projectPath: string, includeDetails?: boolean) =>
-      this.post('/api/worktree/list', { projectPath, includeDetails }),
+    listAll: (projectPath: string, includeDetails?: boolean, forceRefreshGitHub?: boolean) =>
+      this.post('/api/worktree/list', { projectPath, includeDetails, forceRefreshGitHub }),
     create: (projectPath: string, branchName: string, baseBranch?: string) =>
       this.post('/api/worktree/create', {
         projectPath,
@@ -1111,9 +2039,11 @@ export class HttpApiClient implements ElectronAPI {
       }),
     commit: (worktreePath: string, message: string) =>
       this.post('/api/worktree/commit', { worktreePath, message }),
-    push: (worktreePath: string, force?: boolean) =>
-      this.post('/api/worktree/push', { worktreePath, force }),
-    createPR: (worktreePath: string, options?: any) =>
+    generateCommitMessage: (worktreePath: string) =>
+      this.post('/api/worktree/generate-commit-message', { worktreePath }),
+    push: (worktreePath: string, force?: boolean, remote?: string) =>
+      this.post('/api/worktree/push', { worktreePath, force, remote }),
+    createPR: (worktreePath: string, options?: CreatePROptions) =>
       this.post('/api/worktree/create-pr', { worktreePath, ...options }),
     getDiffs: (projectPath: string, featureId: string) =>
       this.post('/api/worktree/diffs', { projectPath, featureId }),
@@ -1126,20 +2056,108 @@ export class HttpApiClient implements ElectronAPI {
     pull: (worktreePath: string) => this.post('/api/worktree/pull', { worktreePath }),
     checkoutBranch: (worktreePath: string, branchName: string) =>
       this.post('/api/worktree/checkout-branch', { worktreePath, branchName }),
-    listBranches: (worktreePath: string) =>
-      this.post('/api/worktree/list-branches', { worktreePath }),
+    listBranches: (worktreePath: string, includeRemote?: boolean) =>
+      this.post('/api/worktree/list-branches', { worktreePath, includeRemote }),
     switchBranch: (worktreePath: string, branchName: string) =>
       this.post('/api/worktree/switch-branch', { worktreePath, branchName }),
-    openInEditor: (worktreePath: string) =>
-      this.post('/api/worktree/open-in-editor', { worktreePath }),
+    listRemotes: (worktreePath: string) =>
+      this.post('/api/worktree/list-remotes', { worktreePath }),
+    addRemote: (worktreePath: string, remoteName: string, remoteUrl: string) =>
+      this.post('/api/worktree/add-remote', { worktreePath, remoteName, remoteUrl }),
+    openInEditor: (worktreePath: string, editorCommand?: string) =>
+      this.post('/api/worktree/open-in-editor', { worktreePath, editorCommand }),
     getDefaultEditor: () => this.get('/api/worktree/default-editor'),
+    getAvailableEditors: () => this.get('/api/worktree/available-editors'),
+    refreshEditors: () => this.post('/api/worktree/refresh-editors', {}),
+    getAvailableTerminals: () => this.get('/api/worktree/available-terminals'),
+    getDefaultTerminal: () => this.get('/api/worktree/default-terminal'),
+    refreshTerminals: () => this.post('/api/worktree/refresh-terminals', {}),
+    openInExternalTerminal: (worktreePath: string, terminalId?: string) =>
+      this.post('/api/worktree/open-in-external-terminal', { worktreePath, terminalId }),
     initGit: (projectPath: string) => this.post('/api/worktree/init-git', { projectPath }),
     startDevServer: (projectPath: string, worktreePath: string) =>
       this.post('/api/worktree/start-dev', { projectPath, worktreePath }),
     stopDevServer: (worktreePath: string) => this.post('/api/worktree/stop-dev', { worktreePath }),
     listDevServers: () => this.post('/api/worktree/list-dev-servers', {}),
+    getDevServerLogs: (worktreePath: string): Promise<DevServerLogsResponse> =>
+      this.get(`/api/worktree/dev-server-logs?worktreePath=${encodeURIComponent(worktreePath)}`),
+    onDevServerLogEvent: (callback: (event: DevServerLogEvent) => void) => {
+      const unsub1 = this.subscribeToEvent('dev-server:started', (payload) =>
+        callback({ type: 'dev-server:started', payload: payload as DevServerStartedEvent })
+      );
+      const unsub2 = this.subscribeToEvent('dev-server:output', (payload) =>
+        callback({ type: 'dev-server:output', payload: payload as DevServerOutputEvent })
+      );
+      const unsub3 = this.subscribeToEvent('dev-server:stopped', (payload) =>
+        callback({ type: 'dev-server:stopped', payload: payload as DevServerStoppedEvent })
+      );
+      return () => {
+        unsub1();
+        unsub2();
+        unsub3();
+      };
+    },
     getPRInfo: (worktreePath: string, branchName: string) =>
       this.post('/api/worktree/pr-info', { worktreePath, branchName }),
+    // Init script methods
+    getInitScript: (projectPath: string) =>
+      this.get(`/api/worktree/init-script?projectPath=${encodeURIComponent(projectPath)}`),
+    setInitScript: (projectPath: string, content: string) =>
+      this.put('/api/worktree/init-script', { projectPath, content }),
+    deleteInitScript: (projectPath: string) =>
+      this.httpDelete('/api/worktree/init-script', { projectPath }),
+    runInitScript: (projectPath: string, worktreePath: string, branch: string) =>
+      this.post('/api/worktree/run-init-script', { projectPath, worktreePath, branch }),
+    discardChanges: (worktreePath: string) =>
+      this.post('/api/worktree/discard-changes', { worktreePath }),
+    onInitScriptEvent: (
+      callback: (event: {
+        type: 'worktree:init-started' | 'worktree:init-output' | 'worktree:init-completed';
+        payload: unknown;
+      }) => void
+    ) => {
+      // Note: subscribeToEvent callback receives (payload) not (_, payload)
+      const unsub1 = this.subscribeToEvent('worktree:init-started', (payload) =>
+        callback({ type: 'worktree:init-started', payload })
+      );
+      const unsub2 = this.subscribeToEvent('worktree:init-output', (payload) =>
+        callback({ type: 'worktree:init-output', payload })
+      );
+      const unsub3 = this.subscribeToEvent('worktree:init-completed', (payload) =>
+        callback({ type: 'worktree:init-completed', payload })
+      );
+      return () => {
+        unsub1();
+        unsub2();
+        unsub3();
+      };
+    },
+    // Test runner methods
+    startTests: (worktreePath: string, options?: { projectPath?: string; testFile?: string }) =>
+      this.post('/api/worktree/start-tests', { worktreePath, ...options }),
+    stopTests: (sessionId: string) => this.post('/api/worktree/stop-tests', { sessionId }),
+    getTestLogs: (worktreePath?: string, sessionId?: string): Promise<TestLogsResponse> => {
+      const params = new URLSearchParams();
+      if (worktreePath) params.append('worktreePath', worktreePath);
+      if (sessionId) params.append('sessionId', sessionId);
+      return this.get(`/api/worktree/test-logs?${params.toString()}`);
+    },
+    onTestRunnerEvent: (callback: (event: TestRunnerEvent) => void) => {
+      const unsub1 = this.subscribeToEvent('test-runner:started', (payload) =>
+        callback({ type: 'test-runner:started', payload: payload as TestRunnerStartedEvent })
+      );
+      const unsub2 = this.subscribeToEvent('test-runner:output', (payload) =>
+        callback({ type: 'test-runner:output', payload: payload as TestRunnerOutputEvent })
+      );
+      const unsub3 = this.subscribeToEvent('test-runner:completed', (payload) =>
+        callback({ type: 'test-runner:completed', payload: payload as TestRunnerCompletedEvent })
+      );
+      return () => {
+        unsub1();
+        unsub2();
+        unsub3();
+      };
+    },
   };
 
   // Git API
@@ -1147,17 +2165,6 @@ export class HttpApiClient implements ElectronAPI {
     getDiffs: (projectPath: string) => this.post('/api/git/diffs', { projectPath }),
     getFileDiff: (projectPath: string, filePath: string) =>
       this.post('/api/git/file-diff', { projectPath, filePath }),
-  };
-
-  // Suggestions API
-  suggestions: SuggestionsAPI = {
-    generate: (projectPath: string, suggestionType?: SuggestionType) =>
-      this.post('/api/suggestions/generate', { projectPath, suggestionType }),
-    stop: () => this.post('/api/suggestions/stop'),
-    status: () => this.get('/api/suggestions/status'),
-    onEvent: (callback: (event: SuggestionsEvent) => void) => {
-      return this.subscribeToEvent('suggestions:event', callback as EventCallback);
-    },
   };
 
   // Spec Regeneration API
@@ -1195,8 +2202,14 @@ export class HttpApiClient implements ElectronAPI {
         projectPath,
         maxFeatures,
       }),
-    stop: () => this.post('/api/spec-regeneration/stop'),
-    status: () => this.get('/api/spec-regeneration/status'),
+    sync: (projectPath: string) => this.post('/api/spec-regeneration/sync', { projectPath }),
+    stop: (projectPath?: string) => this.post('/api/spec-regeneration/stop', { projectPath }),
+    status: (projectPath?: string) =>
+      this.get(
+        projectPath
+          ? `/api/spec-regeneration/status?projectPath=${encodeURIComponent(projectPath)}`
+          : '/api/spec-regeneration/status'
+      ),
     onEvent: (callback: (event: SpecRegenerationEvent) => void) => {
       return this.subscribeToEvent('spec-regeneration:event', callback as EventCallback);
     },
@@ -1222,8 +2235,20 @@ export class HttpApiClient implements ElectronAPI {
     checkRemote: (projectPath: string) => this.post('/api/github/check-remote', { projectPath }),
     listIssues: (projectPath: string) => this.post('/api/github/issues', { projectPath }),
     listPRs: (projectPath: string) => this.post('/api/github/prs', { projectPath }),
-    validateIssue: (projectPath: string, issue: IssueValidationInput, model?: string) =>
-      this.post('/api/github/validate-issue', { projectPath, ...issue, model }),
+    validateIssue: (
+      projectPath: string,
+      issue: IssueValidationInput,
+      model?: ModelId,
+      thinkingLevel?: ThinkingLevel,
+      reasoningEffort?: ReasoningEffort
+    ) =>
+      this.post('/api/github/validate-issue', {
+        projectPath,
+        ...issue,
+        model,
+        thinkingLevel,
+        reasoningEffort,
+      }),
     getValidationStatus: (projectPath: string, issueNumber?: number) =>
       this.post('/api/github/validation-status', { projectPath, issueNumber }),
     stopValidation: (projectPath: string, issueNumber: number) =>
@@ -1271,7 +2296,8 @@ export class HttpApiClient implements ElectronAPI {
       message: string,
       workingDirectory?: string,
       imagePaths?: string[],
-      model?: string
+      model?: string,
+      thinkingLevel?: string
     ): Promise<{ success: boolean; error?: string }> =>
       this.post('/api/agent/send', {
         sessionId,
@@ -1279,6 +2305,7 @@ export class HttpApiClient implements ElectronAPI {
         workingDirectory,
         imagePaths,
         model,
+        thinkingLevel,
       }),
 
     getHistory: (
@@ -1305,7 +2332,8 @@ export class HttpApiClient implements ElectronAPI {
       sessionId: string,
       message: string,
       imagePaths?: string[],
-      model?: string
+      model?: string,
+      thinkingLevel?: string
     ): Promise<{
       success: boolean;
       queuedPrompt?: {
@@ -1313,10 +2341,12 @@ export class HttpApiClient implements ElectronAPI {
         message: string;
         imagePaths?: string[];
         model?: string;
+        thinkingLevel?: string;
         addedAt: string;
       };
       error?: string;
-    }> => this.post('/api/agent/queue/add', { sessionId, message, imagePaths, model }),
+    }> =>
+      this.post('/api/agent/queue/add', { sessionId, message, imagePaths, model, thinkingLevel }),
 
     queueList: (
       sessionId: string
@@ -1327,6 +2357,7 @@ export class HttpApiClient implements ElectronAPI {
         message: string;
         imagePaths?: string[];
         model?: string;
+        thinkingLevel?: string;
         addedAt: string;
       }>;
       error?: string;
@@ -1375,19 +2406,15 @@ export class HttpApiClient implements ElectronAPI {
         theme: string;
         sidebarOpen: boolean;
         chatHistoryOpen: boolean;
-        kanbanCardDetailLevel: string;
         maxConcurrency: number;
         defaultSkipTests: boolean;
         enableDependencyBlocking: boolean;
         useWorktrees: boolean;
-        showProfilesOnly: boolean;
         defaultPlanningMode: string;
         defaultRequirePlanApproval: boolean;
-        defaultAIProfileId: string | null;
         muteDoneSound: boolean;
         enhancementModel: string;
         keyboardShortcuts: Record<string, string>;
-        aiProfiles: unknown[];
         projects: unknown[];
         trashedProjects: unknown[];
         projectHistory: string[];
@@ -1408,8 +2435,6 @@ export class HttpApiClient implements ElectronAPI {
           headers?: Record<string, string>;
           enabled?: boolean;
         }>;
-        mcpAutoApproveTools?: boolean;
-        mcpUnrestrictedTools?: boolean;
       };
       error?: string;
     }> => this.get('/api/settings/global'),
@@ -1473,7 +2498,12 @@ export class HttpApiClient implements ElectronAPI {
           cardBorderOpacity: number;
           hideScrollbar: boolean;
         };
+        worktreePanelVisible?: boolean;
+        showInitScriptIndicator?: boolean;
+        defaultDeleteBranchWithWorktree?: boolean;
+        autoDismissInitScriptIndicator?: boolean;
         lastSelectedSessionId?: string;
+        testCommand?: string;
       };
       error?: string;
     }> => this.post('/api/settings/project', { projectPath }),
@@ -1501,6 +2531,26 @@ export class HttpApiClient implements ElectronAPI {
       migratedProjectCount: number;
       errors: string[];
     }> => this.post('/api/settings/migrate', { data }),
+
+    // Filesystem agents discovery (read-only)
+    discoverAgents: (
+      projectPath?: string,
+      sources?: Array<'user' | 'project'>
+    ): Promise<{
+      success: boolean;
+      agents?: Array<{
+        name: string;
+        definition: {
+          description: string;
+          prompt: string;
+          tools?: string[];
+          model?: 'sonnet' | 'opus' | 'haiku' | 'inherit';
+        };
+        source: 'user' | 'project';
+        filePath: string;
+      }>;
+      error?: string;
+    }> => this.post('/api/settings/agents/discover', { projectPath, sources }),
   };
 
   // Sessions API
@@ -1552,6 +2602,30 @@ export class HttpApiClient implements ElectronAPI {
     getUsage: (): Promise<ClaudeUsageResponse> => this.get('/api/claude/usage'),
   };
 
+  // Codex API
+  codex = {
+    getUsage: (): Promise<CodexUsageResponse> => this.get('/api/codex/usage'),
+    getModels: (
+      refresh = false
+    ): Promise<{
+      success: boolean;
+      models?: Array<{
+        id: string;
+        label: string;
+        description: string;
+        hasThinking: boolean;
+        supportsVision: boolean;
+        tier: 'premium' | 'standard' | 'basic';
+        isDefault: boolean;
+      }>;
+      cachedAt?: number;
+      error?: string;
+    }> => {
+      const url = `/api/codex/models${refresh ? '?refresh=true' : ''}`;
+      return this.get(url);
+    },
+  };
+
   // Context API
   context = {
     describeImage: (
@@ -1583,8 +2657,32 @@ export class HttpApiClient implements ElectronAPI {
     stop: (): Promise<{ success: boolean; error?: string }> =>
       this.post('/api/backlog-plan/stop', {}),
 
-    status: (): Promise<{ success: boolean; isRunning?: boolean; error?: string }> =>
-      this.get('/api/backlog-plan/status'),
+    status: (
+      projectPath: string
+    ): Promise<{
+      success: boolean;
+      isRunning?: boolean;
+      savedPlan?: {
+        savedAt: string;
+        prompt: string;
+        model?: string;
+        result: {
+          changes: Array<{
+            type: 'add' | 'update' | 'delete';
+            featureId?: string;
+            feature?: Record<string, unknown>;
+            reason: string;
+          }>;
+          summary: string;
+          dependencyUpdates: Array<{
+            featureId: string;
+            removedDependencies: string[];
+            addedDependencies: string[];
+          }>;
+        };
+      } | null;
+      error?: string;
+    }> => this.get(`/api/backlog-plan/status?projectPath=${encodeURIComponent(projectPath)}`),
 
     apply: (
       projectPath: string,
@@ -1601,13 +2699,121 @@ export class HttpApiClient implements ElectronAPI {
           removedDependencies: string[];
           addedDependencies: string[];
         }>;
-      }
+      },
+      branchName?: string
     ): Promise<{ success: boolean; appliedChanges?: string[]; error?: string }> =>
-      this.post('/api/backlog-plan/apply', { projectPath, plan }),
+      this.post('/api/backlog-plan/apply', { projectPath, plan, branchName }),
+
+    clear: (projectPath: string): Promise<{ success: boolean; error?: string }> =>
+      this.post('/api/backlog-plan/clear', { projectPath }),
 
     onEvent: (callback: (data: unknown) => void): (() => void) => {
       return this.subscribeToEvent('backlog-plan:event', callback as EventCallback);
     },
+  };
+
+  // Ideation API - brainstorming and idea management
+  ideation: IdeationAPI = {
+    startSession: (projectPath: string, options?: StartSessionOptions) =>
+      this.post('/api/ideation/session/start', { projectPath, options }),
+
+    getSession: (projectPath: string, sessionId: string) =>
+      this.post('/api/ideation/session/get', { projectPath, sessionId }),
+
+    sendMessage: (
+      sessionId: string,
+      message: string,
+      options?: { imagePaths?: string[]; model?: string }
+    ) => this.post('/api/ideation/session/message', { sessionId, message, options }),
+
+    stopSession: (sessionId: string) => this.post('/api/ideation/session/stop', { sessionId }),
+
+    listIdeas: (projectPath: string) => this.post('/api/ideation/ideas/list', { projectPath }),
+
+    createIdea: (projectPath: string, idea: CreateIdeaInput) =>
+      this.post('/api/ideation/ideas/create', { projectPath, idea }),
+
+    getIdea: (projectPath: string, ideaId: string) =>
+      this.post('/api/ideation/ideas/get', { projectPath, ideaId }),
+
+    updateIdea: (projectPath: string, ideaId: string, updates: UpdateIdeaInput) =>
+      this.post('/api/ideation/ideas/update', { projectPath, ideaId, updates }),
+
+    deleteIdea: (projectPath: string, ideaId: string) =>
+      this.post('/api/ideation/ideas/delete', { projectPath, ideaId }),
+
+    analyzeProject: (projectPath: string) => this.post('/api/ideation/analyze', { projectPath }),
+
+    generateSuggestions: (
+      projectPath: string,
+      promptId: string,
+      category: IdeaCategory,
+      count?: number,
+      contextSources?: IdeationContextSources
+    ) =>
+      this.post('/api/ideation/suggestions/generate', {
+        projectPath,
+        promptId,
+        category,
+        count,
+        contextSources,
+      }),
+
+    convertToFeature: (projectPath: string, ideaId: string, options?: ConvertToFeatureOptions) =>
+      this.post('/api/ideation/convert', { projectPath, ideaId, ...options }),
+
+    addSuggestionToBoard: (
+      projectPath: string,
+      suggestion: AnalysisSuggestion
+    ): Promise<{ success: boolean; featureId?: string; error?: string }> =>
+      this.post('/api/ideation/add-suggestion', { projectPath, suggestion }),
+
+    getPrompts: () => this.get('/api/ideation/prompts'),
+
+    onStream: (callback: (event: IdeationStreamEvent) => void): (() => void) => {
+      return this.subscribeToEvent('ideation:stream', callback as EventCallback);
+    },
+
+    onAnalysisEvent: (callback: (event: IdeationAnalysisEvent) => void): (() => void) => {
+      return this.subscribeToEvent('ideation:analysis', callback as EventCallback);
+    },
+  };
+
+  // Notifications API - project-level notifications
+  notifications: NotificationsAPI & {
+    onNotificationCreated: (callback: (notification: Notification) => void) => () => void;
+  } = {
+    list: (projectPath: string) => this.post('/api/notifications/list', { projectPath }),
+
+    getUnreadCount: (projectPath: string) =>
+      this.post('/api/notifications/unread-count', { projectPath }),
+
+    markAsRead: (projectPath: string, notificationId?: string) =>
+      this.post('/api/notifications/mark-read', { projectPath, notificationId }),
+
+    dismiss: (projectPath: string, notificationId?: string) =>
+      this.post('/api/notifications/dismiss', { projectPath, notificationId }),
+
+    onNotificationCreated: (callback: (notification: Notification) => void): (() => void) => {
+      return this.subscribeToEvent('notification:created', callback as EventCallback);
+    },
+  };
+
+  // Event History API - stored events for debugging and replay
+  eventHistory: EventHistoryAPI = {
+    list: (projectPath: string, filter?: EventHistoryFilter) =>
+      this.post('/api/event-history/list', { projectPath, filter }),
+
+    get: (projectPath: string, eventId: string) =>
+      this.post('/api/event-history/get', { projectPath, eventId }),
+
+    delete: (projectPath: string, eventId: string) =>
+      this.post('/api/event-history/delete', { projectPath, eventId }),
+
+    clear: (projectPath: string) => this.post('/api/event-history/clear', { projectPath }),
+
+    replay: (projectPath: string, eventId: string, hookIds?: string[]) =>
+      this.post('/api/event-history/replay', { projectPath, eventId, hookIds }),
   };
 
   // MCP API - Test MCP server connections and list tools
@@ -1757,5 +2963,5 @@ export function getHttpApiClient(): HttpApiClient {
 // This ensures the init promise is created early, even before React components mount
 // The actual async work happens in the background and won't block module loading
 initApiKey().catch((error) => {
-  console.error('[HTTP Client] Failed to initialize API key:', error);
+  logger.error('Failed to initialize API key:', error);
 });

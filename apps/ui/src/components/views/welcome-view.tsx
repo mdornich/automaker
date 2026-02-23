@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react';
+import { createLogger } from '@automaker/utils/logger';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -8,7 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { useAppStore, type ThemeMode } from '@/store/app-store';
+import { useAppStore } from '@/store/app-store';
 import { getElectronAPI } from '@/lib/electron';
 import { initializeProject } from '@/lib/project-init';
 import {
@@ -19,8 +20,8 @@ import {
   Sparkles,
   MessageSquare,
   ChevronDown,
-  Loader2,
 } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -34,16 +35,10 @@ import { getHttpApiClient } from '@/lib/http-api-client';
 import type { StarterTemplate } from '@/lib/templates';
 import { useNavigate } from '@tanstack/react-router';
 
+const logger = createLogger('WelcomeView');
+
 export function WelcomeView() {
-  const {
-    projects,
-    trashedProjects,
-    currentProject,
-    upsertAndSetCurrentProject,
-    addProject,
-    setCurrentProject,
-    theme: globalTheme,
-  } = useAppStore();
+  const { projects, upsertAndSetCurrentProject, addProject, setCurrentProject } = useAppStore();
   const navigate = useNavigate();
   const [showNewProjectModal, setShowNewProjectModal] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
@@ -65,13 +60,13 @@ export function WelcomeView() {
     const api = getElectronAPI();
 
     if (!api.autoMode?.analyzeProject) {
-      console.log('[Welcome] Auto mode API not available, skipping analysis');
+      logger.info('[Welcome] Auto mode API not available, skipping analysis');
       return;
     }
 
     setIsAnalyzing(true);
     try {
-      console.log('[Welcome] Starting project analysis for:', projectPath);
+      logger.info('[Welcome] Starting project analysis for:', projectPath);
       const result = await api.autoMode.analyzeProject(projectPath);
 
       if (result.success) {
@@ -79,10 +74,10 @@ export function WelcomeView() {
           description: 'AI agent has analyzed your project structure',
         });
       } else {
-        console.error('[Welcome] Project analysis failed:', result.error);
+        logger.error('[Welcome] Project analysis failed:', result.error);
       }
     } catch (error) {
-      console.error('[Welcome] Failed to analyze project:', error);
+      logger.error('[Welcome] Failed to analyze project:', error);
     } finally {
       setIsAnalyzing(false);
     }
@@ -106,13 +101,8 @@ export function WelcomeView() {
         }
 
         // Upsert project and set as current (handles both create and update cases)
-        // Theme preservation is handled by the store action
-        const trashedProject = trashedProjects.find((p) => p.path === path);
-        const effectiveTheme =
-          (trashedProject?.theme as ThemeMode | undefined) ||
-          (currentProject?.theme as ThemeMode | undefined) ||
-          globalTheme;
-        upsertAndSetCurrentProject(path, name, effectiveTheme);
+        // Theme handling (trashed project recovery or undefined for global) is done by the store
+        upsertAndSetCurrentProject(path, name);
 
         // Show initialization dialog if files were created
         if (initResult.createdFiles && initResult.createdFiles.length > 0) {
@@ -125,8 +115,8 @@ export function WelcomeView() {
           setShowInitDialog(true);
 
           // Kick off agent to analyze the project and update app_spec.txt
-          console.log('[Welcome] Project initialized, created files:', initResult.createdFiles);
-          console.log('[Welcome] Kicking off project analysis agent...');
+          logger.info('[Welcome] Project initialized, created files:', initResult.createdFiles);
+          logger.info('[Welcome] Kicking off project analysis agent...');
 
           // Start analysis in background (don't await, let it run async)
           analyzeProject(path);
@@ -139,7 +129,7 @@ export function WelcomeView() {
         // Navigate to the board view
         navigate({ to: '/board' });
       } catch (error) {
-        console.error('[Welcome] Failed to open project:', error);
+        logger.error('[Welcome] Failed to open project:', error);
         toast.error('Failed to open project', {
           description: error instanceof Error ? error.message : 'Unknown error',
         });
@@ -147,14 +137,7 @@ export function WelcomeView() {
         setIsOpening(false);
       }
     },
-    [
-      trashedProjects,
-      currentProject,
-      globalTheme,
-      upsertAndSetCurrentProject,
-      analyzeProject,
-      navigate,
-    ]
+    [upsertAndSetCurrentProject, analyzeProject, navigate]
   );
 
   const handleOpenProject = useCallback(async () => {
@@ -179,7 +162,7 @@ export function WelcomeView() {
         }
       }
     } catch (error) {
-      console.error('[Welcome] Failed to check workspace config:', error);
+      logger.error('[Welcome] Failed to check workspace config:', error);
       // Fall back to current behavior on error
       const api = getElectronAPI();
       const result = await api.openDirectory();
@@ -316,8 +299,11 @@ export function WelcomeView() {
         projectPath: projectPath,
       });
       setShowInitDialog(true);
+
+      // Navigate to the board view (dialog shows as overlay)
+      navigate({ to: '/board' });
     } catch (error) {
-      console.error('Failed to create project:', error);
+      logger.error('Failed to create project:', error);
       toast.error('Failed to create project', {
         description: error instanceof Error ? error.message : 'Unknown error',
       });
@@ -415,10 +401,13 @@ export function WelcomeView() {
       });
       setShowInitDialog(true);
 
+      // Navigate to the board view (dialog shows as overlay)
+      navigate({ to: '/board' });
+
       // Kick off project analysis
       analyzeProject(projectPath);
     } catch (error) {
-      console.error('Failed to create project from template:', error);
+      logger.error('Failed to create project from template:', error);
       toast.error('Failed to create project', {
         description: error instanceof Error ? error.message : 'Unknown error',
       });
@@ -512,10 +501,13 @@ export function WelcomeView() {
       });
       setShowInitDialog(true);
 
+      // Navigate to the board view (dialog shows as overlay)
+      navigate({ to: '/board' });
+
       // Kick off project analysis
       analyzeProject(projectPath);
     } catch (error) {
-      console.error('Failed to create project from custom URL:', error);
+      logger.error('Failed to create project from custom URL:', error);
       toast.error('Failed to create project', {
         description: error instanceof Error ? error.message : 'Unknown error',
       });
@@ -746,7 +738,7 @@ export function WelcomeView() {
               <div className="mt-5 p-4 rounded-xl bg-muted/50 border border-border">
                 {isAnalyzing ? (
                   <div className="flex items-center gap-3">
-                    <Loader2 className="w-4 h-4 text-brand-500 animate-spin" />
+                    <Spinner size="sm" />
                     <p className="text-sm text-brand-500">
                       AI agent is analyzing your project structure...
                     </p>
@@ -790,7 +782,7 @@ export function WelcomeView() {
           data-testid="project-opening-overlay"
         >
           <div className="flex flex-col items-center gap-4 p-8 rounded-2xl bg-card border border-border shadow-2xl">
-            <Loader2 className="w-10 h-10 text-brand-500 animate-spin" />
+            <Spinner size="xl" />
             <p className="text-foreground font-medium">Initializing project...</p>
           </div>
         </div>

@@ -4,6 +4,10 @@ import type React from 'react';
 export interface NavSection {
   label?: string;
   items: NavItem[];
+  /** Whether this section can be collapsed */
+  collapsible?: boolean;
+  /** Whether this section should start collapsed */
+  defaultCollapsed?: boolean;
 }
 
 export interface NavItem {
@@ -13,6 +17,8 @@ export interface NavItem {
   shortcut?: string;
   /** Optional count badge to display next to the nav item */
   count?: number;
+  /** Whether this nav item is in a loading state (shows spinner) */
+  isLoading?: boolean;
 }
 
 export interface SortableProjectItemProps {

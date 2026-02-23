@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { createLogger } from '@automaker/utils/logger';
 import { useAppStore } from '@/store/app-store';
 import { getElectronAPI } from '@/lib/electron';
 import { getHttpApiClient } from '@/lib/http-api-client';
@@ -7,7 +8,10 @@ import { Button } from '@/components/ui/button';
 import { HotkeyButton } from '@/components/ui/hotkey-button';
 import { Card } from '@/components/ui/card';
 import {
-  RefreshCw,
+  HeaderActionsPanel,
+  HeaderActionsPanelTrigger,
+} from '@/components/ui/header-actions-panel';
+import {
   FileText,
   Image as ImageIcon,
   Trash2,
@@ -19,9 +23,9 @@ import {
   Pencil,
   FilePlus,
   FileUp,
-  Loader2,
   MoreVertical,
 } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import {
   useKeyboardShortcuts,
   useKeyboardShortcutsConfig,
@@ -38,6 +42,8 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
+
+const logger = createLogger('ContextView');
 import { sanitizeFilename } from '@/lib/image-utils';
 import { Markdown } from '../ui/markdown';
 import {
@@ -91,14 +97,11 @@ export function ContextView() {
   const [editDescriptionValue, setEditDescriptionValue] = useState('');
   const [editDescriptionFileName, setEditDescriptionFileName] = useState('');
 
+  // Actions panel state (for tablet/mobile)
+  const [showActionsPanel, setShowActionsPanel] = useState(false);
+
   // File input ref for import
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // Get images directory path
-  const getImagesPath = useCallback(() => {
-    if (!currentProject) return null;
-    return `${currentProject.path}/.automaker/images`;
-  }, [currentProject]);
 
   // Keyboard shortcuts for this view
   const contextShortcuts: KeyboardShortcut[] = useMemo(
@@ -160,7 +163,7 @@ export function ContextView() {
         const metadataPath = `${contextPath}/context-metadata.json`;
         await api.writeFile(metadataPath, JSON.stringify(metadata, null, 2));
       } catch (error) {
-        console.error('Failed to save metadata:', error);
+        logger.error('Failed to save metadata:', error);
       }
     },
     [getContextPath]
@@ -202,7 +205,7 @@ export function ContextView() {
         setContextFiles(files);
       }
     } catch (error) {
-      console.error('Failed to load context files:', error);
+      logger.error('Failed to load context files:', error);
     } finally {
       setIsLoading(false);
     }
@@ -223,7 +226,7 @@ export function ContextView() {
         setHasChanges(false);
       }
     } catch (error) {
-      console.error('Failed to load file content:', error);
+      logger.error('Failed to load file content:', error);
     }
   }, []);
 
@@ -247,7 +250,7 @@ export function ContextView() {
       setSelectedFile({ ...selectedFile, content: editedContent });
       setHasChanges(false);
     } catch (error) {
-      console.error('Failed to save file:', error);
+      logger.error('Failed to save file:', error);
     } finally {
       setIsSaving(false);
     }
@@ -279,7 +282,7 @@ export function ContextView() {
         result.error || `Automaker couldn't generate a description for “${fileName}”.`;
       toast.error('Failed to generate description', { description: message });
     } catch (error) {
-      console.error('Failed to generate description:', error);
+      logger.error('Failed to generate description:', error);
       const message =
         error instanceof Error
           ? error.message
@@ -315,7 +318,7 @@ export function ContextView() {
           });
         }
       } catch (error) {
-        console.error('Failed to generate description:', error);
+        logger.error('Failed to generate description:', error);
       } finally {
         // Remove from generating set
         setGeneratingDescriptions((prev) => {
@@ -401,7 +404,7 @@ export function ContextView() {
       // For images, use the path in the images directory
       generateDescriptionAsync(imagePathForDescription || filePath, fileName, isImage);
     } catch (error) {
-      console.error('Failed to upload file:', error);
+      logger.error('Failed to upload file:', error);
       toast.error('Failed to upload file', {
         description: error instanceof Error ? error.message : 'Unknown error',
       });
@@ -492,7 +495,15 @@ export function ContextView() {
       setNewMarkdownDescription('');
       setNewMarkdownContent('');
     } catch (error) {
-      console.error('Failed to create markdown:', error);
+      logger.error('Failed to create markdown:', error);
+      // Close dialog and reset state even on error to avoid stuck dialog
+      setIsCreateMarkdownOpen(false);
+      setNewMarkdownName('');
+      setNewMarkdownDescription('');
+      setNewMarkdownContent('');
+      toast.error('Failed to create markdown file', {
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+      });
     }
   };
 
@@ -515,7 +526,7 @@ export function ContextView() {
       setHasChanges(false);
       await loadContextFiles();
     } catch (error) {
-      console.error('Failed to delete file:', error);
+      logger.error('Failed to delete file:', error);
     }
   };
 
@@ -537,14 +548,14 @@ export function ContextView() {
       // Check if file with new name already exists
       const exists = await api.exists(newPath);
       if (exists) {
-        console.error('A file with this name already exists');
+        logger.error('A file with this name already exists');
         return;
       }
 
       // Read current file content
       const result = await api.readFile(selectedFile.path);
       if (!result.success || result.content === undefined) {
-        console.error('Failed to read file for rename');
+        logger.error('Failed to read file for rename');
         return;
       }
 
@@ -578,7 +589,7 @@ export function ContextView() {
       };
       setSelectedFile(renamedFile);
     } catch (error) {
-      console.error('Failed to rename file:', error);
+      logger.error('Failed to rename file:', error);
     }
   };
 
@@ -603,7 +614,7 @@ export function ContextView() {
       setEditDescriptionValue('');
       setEditDescriptionFileName('');
     } catch (error) {
-      console.error('Failed to save description:', error);
+      logger.error('Failed to save description:', error);
     }
   };
 
@@ -634,7 +645,7 @@ export function ContextView() {
 
       await loadContextFiles();
     } catch (error) {
-      console.error('Failed to delete file:', error);
+      logger.error('Failed to delete file:', error);
     }
   };
 
@@ -652,7 +663,7 @@ export function ContextView() {
   if (isLoading) {
     return (
       <div className="flex-1 flex items-center justify-center" data-testid="context-view-loading">
-        <RefreshCw className="w-6 h-6 animate-spin text-muted-foreground" />
+        <Spinner size="lg" />
       </div>
     );
   }
@@ -680,29 +691,69 @@ export function ContextView() {
             </p>
           </div>
         </div>
-        <div className="flex gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleImportClick}
-            disabled={isUploading}
-            data-testid="import-file-button"
-          >
-            <FileUp className="w-4 h-4 mr-2" />
-            Import File
-          </Button>
-          <HotkeyButton
-            size="sm"
-            onClick={() => setIsCreateMarkdownOpen(true)}
-            hotkey={shortcuts.addContextFile}
-            hotkeyActive={false}
-            data-testid="create-markdown-button"
-          >
-            <FilePlus className="w-4 h-4 mr-2" />
-            Create Markdown
-          </HotkeyButton>
+        <div className="flex items-center gap-2">
+          {/* Desktop: show actions inline */}
+          <div className="hidden lg:flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleImportClick}
+              disabled={isUploading}
+              data-testid="import-file-button"
+            >
+              <FileUp className="w-4 h-4 mr-2" />
+              Import File
+            </Button>
+            <HotkeyButton
+              size="sm"
+              onClick={() => setIsCreateMarkdownOpen(true)}
+              hotkey={shortcuts.addContextFile}
+              hotkeyActive={false}
+              data-testid="create-markdown-button"
+            >
+              <FilePlus className="w-4 h-4 mr-2" />
+              Create Markdown
+            </HotkeyButton>
+          </div>
+          {/* Tablet/Mobile: show trigger for actions panel */}
+          <HeaderActionsPanelTrigger
+            isOpen={showActionsPanel}
+            onToggle={() => setShowActionsPanel(!showActionsPanel)}
+          />
         </div>
       </div>
+
+      {/* Actions Panel (tablet/mobile) */}
+      <HeaderActionsPanel
+        isOpen={showActionsPanel}
+        onClose={() => setShowActionsPanel(false)}
+        title="Context Actions"
+      >
+        <Button
+          variant="outline"
+          className="w-full justify-start"
+          onClick={() => {
+            handleImportClick();
+            setShowActionsPanel(false);
+          }}
+          disabled={isUploading}
+          data-testid="import-file-button-mobile"
+        >
+          <FileUp className="w-4 h-4 mr-2" />
+          Import File
+        </Button>
+        <Button
+          className="w-full justify-start"
+          onClick={() => {
+            setIsCreateMarkdownOpen(true);
+            setShowActionsPanel(false);
+          }}
+          data-testid="create-markdown-button-mobile"
+        >
+          <FilePlus className="w-4 h-4 mr-2" />
+          Create Markdown
+        </Button>
+      </HeaderActionsPanel>
 
       {/* Main content area with file list and editor */}
       <div
@@ -732,7 +783,7 @@ export function ContextView() {
         {isUploading && (
           <div className="absolute inset-0 bg-background/80 z-50 flex items-center justify-center">
             <div className="flex flex-col items-center">
-              <Loader2 className="w-8 h-8 animate-spin text-primary mb-2" />
+              <Spinner size="xl" className="mb-2" />
               <span className="text-sm font-medium">Uploading {uploadingFileName}...</span>
             </div>
           </div>
@@ -780,7 +831,7 @@ export function ContextView() {
                         <span className="truncate text-sm block">{file.name}</span>
                         {isGenerating ? (
                           <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                            <Loader2 className="w-3 h-3 animate-spin" />
+                            <Spinner size="xs" />
                             Generating description...
                           </span>
                         ) : file.description ? (
@@ -897,7 +948,7 @@ export function ContextView() {
                       </span>
                       {generatingDescriptions.has(selectedFile.name) ? (
                         <div className="flex items-center gap-2 mt-1 text-sm text-muted-foreground">
-                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <Spinner size="sm" />
                           <span>Generating description with AI...</span>
                         </div>
                       ) : selectedFile.description ? (

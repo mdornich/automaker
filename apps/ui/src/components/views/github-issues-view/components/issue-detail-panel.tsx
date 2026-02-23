@@ -4,7 +4,6 @@ import {
   X,
   Wand2,
   ExternalLink,
-  Loader2,
   CheckCircle,
   Clock,
   GitPullRequest,
@@ -14,6 +13,7 @@ import {
   ChevronDown,
   ChevronUp,
 } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -21,6 +21,7 @@ import { Markdown } from '@/components/ui/markdown';
 import { cn } from '@/lib/utils';
 import type { IssueDetailPanelProps } from '../types';
 import { isValidationStale } from '../utils';
+import { ModelOverrideTrigger } from '@/components/shared';
 import { useIssueComments } from '../hooks';
 import { CommentItem } from './comment-item';
 
@@ -34,6 +35,7 @@ export function IssueDetailPanel({
   onClose,
   onShowRevalidateConfirm,
   formatDate,
+  modelOverride,
 }: IssueDetailPanelProps) {
   const isValidating = validatingIssues.has(issue.number);
   const cached = cachedValidations.get(issue.number);
@@ -56,6 +58,7 @@ export function IssueDetailPanel({
   const getValidationOptions = (forceRevalidate = false) => {
     return {
       forceRevalidate,
+      modelEntry: modelOverride.effectiveModelEntry, // Pass the full PhaseModelEntry to preserve thinking level
       comments: includeCommentsInAnalysis && comments.length > 0 ? comments : undefined,
       linkedPRs: issue.linkedPRs?.map((pr) => ({
         number: pr.number,
@@ -83,8 +86,7 @@ export function IssueDetailPanel({
           {(() => {
             if (isValidating) {
               return (
-                <Button variant="default" size="sm" disabled>
-                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                <Button variant="default" size="sm" loading>
                   Validating...
                 </Button>
               );
@@ -116,6 +118,15 @@ export function IssueDetailPanel({
                     <Clock className="h-4 w-4 mr-1 text-yellow-500" />
                     View (stale)
                   </Button>
+                  <ModelOverrideTrigger
+                    currentModelEntry={modelOverride.effectiveModelEntry}
+                    onModelChange={modelOverride.setOverride}
+                    phase="validationModel"
+                    isOverridden={modelOverride.isOverridden}
+                    size="sm"
+                    variant="icon"
+                    className="mx-1"
+                  />
                   <Button
                     variant="default"
                     size="sm"
@@ -129,14 +140,25 @@ export function IssueDetailPanel({
             }
 
             return (
-              <Button
-                variant="default"
-                size="sm"
-                onClick={() => onValidateIssue(issue, getValidationOptions())}
-              >
-                <Wand2 className="h-4 w-4 mr-1" />
-                Validate with AI
-              </Button>
+              <>
+                <ModelOverrideTrigger
+                  currentModelEntry={modelOverride.effectiveModelEntry}
+                  onModelChange={modelOverride.setOverride}
+                  phase="validationModel"
+                  isOverridden={modelOverride.isOverridden}
+                  size="sm"
+                  variant="icon"
+                  className="mr-1"
+                />
+                <Button
+                  variant="default"
+                  size="sm"
+                  onClick={() => onValidateIssue(issue, getValidationOptions())}
+                >
+                  <Wand2 className="h-4 w-4 mr-1" />
+                  Validate with AI
+                </Button>
+              </>
             );
           })()}
           <Button variant="outline" size="sm" onClick={() => onOpenInGitHub(issue.url)}>
@@ -274,9 +296,7 @@ export function IssueDetailPanel({
               <span className="text-sm font-medium">
                 Comments {totalCount > 0 && `(${totalCount})`}
               </span>
-              {commentsLoading && (
-                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
-              )}
+              {commentsLoading && <Spinner size="xs" />}
               {commentsExpanded ? (
                 <ChevronUp className="h-4 w-4 text-muted-foreground" />
               ) : (
@@ -313,16 +333,9 @@ export function IssueDetailPanel({
                       size="sm"
                       className="w-full"
                       onClick={loadMore}
-                      disabled={loadingMore}
+                      loading={loadingMore}
                     >
-                      {loadingMore ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Loading...
-                        </>
-                      ) : (
-                        'Load More Comments'
-                      )}
+                      {loadingMore ? 'Loading...' : 'Load More Comments'}
                     </Button>
                   )}
                 </div>

@@ -1,5 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { ImageIcon, Upload, Loader2, Trash2 } from 'lucide-react';
+import { createLogger } from '@automaker/utils/logger';
+import { ImageIcon, Upload, Trash2 } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
+
+const logger = createLogger('BoardBackgroundModal');
 import {
   Sheet,
   SheetContent,
@@ -13,7 +17,8 @@ import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
 import { cn } from '@/lib/utils';
 import { useAppStore, defaultBackgroundSettings } from '@/store/app-store';
-import { getHttpApiClient, getServerUrlSync } from '@/lib/http-api-client';
+import { getHttpApiClient } from '@/lib/http-api-client';
+import { getAuthenticatedImageUrl } from '@/lib/api-fetch';
 import { useBoardBackgroundSettings } from '@/hooks/use-board-background-settings';
 import { toast } from 'sonner';
 import {
@@ -40,6 +45,8 @@ export function BoardBackgroundModal({ open, onOpenChange }: BoardBackgroundModa
     setCardBorderOpacity,
     setHideScrollbar,
     clearBoardBackground,
+    persistSettings,
+    getCurrentSettings,
   } = useBoardBackgroundSettings();
   const [isDragOver, setIsDragOver] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -50,24 +57,44 @@ export function BoardBackgroundModal({ open, onOpenChange }: BoardBackgroundModa
   const backgroundSettings =
     (currentProject && boardBackgroundByProject[currentProject.path]) || defaultBackgroundSettings;
 
-  const cardOpacity = backgroundSettings.cardOpacity;
-  const columnOpacity = backgroundSettings.columnOpacity;
+  // Local state for sliders during dragging (avoids store updates during drag)
+  const [localCardOpacity, setLocalCardOpacity] = useState(backgroundSettings.cardOpacity);
+  const [localColumnOpacity, setLocalColumnOpacity] = useState(backgroundSettings.columnOpacity);
+  const [localCardBorderOpacity, setLocalCardBorderOpacity] = useState(
+    backgroundSettings.cardBorderOpacity
+  );
+  const [isDragging, setIsDragging] = useState(false);
+
+  // Sync local state with store when not dragging (e.g., on modal open or external changes)
+  useEffect(() => {
+    if (!isDragging) {
+      setLocalCardOpacity(backgroundSettings.cardOpacity);
+      setLocalColumnOpacity(backgroundSettings.columnOpacity);
+      setLocalCardBorderOpacity(backgroundSettings.cardBorderOpacity);
+    }
+  }, [
+    isDragging,
+    backgroundSettings.cardOpacity,
+    backgroundSettings.columnOpacity,
+    backgroundSettings.cardBorderOpacity,
+  ]);
+
   const columnBorderEnabled = backgroundSettings.columnBorderEnabled;
   const cardGlassmorphism = backgroundSettings.cardGlassmorphism;
   const cardBorderEnabled = backgroundSettings.cardBorderEnabled;
-  const cardBorderOpacity = backgroundSettings.cardBorderOpacity;
   const hideScrollbar = backgroundSettings.hideScrollbar;
   const imageVersion = backgroundSettings.imageVersion;
 
   // Update preview image when background settings change
   useEffect(() => {
     if (currentProject && backgroundSettings.imagePath) {
-      const serverUrl = import.meta.env.VITE_SERVER_URL || getServerUrlSync();
       // Add cache-busting query parameter to force browser to reload image
-      const cacheBuster = imageVersion ? `&v=${imageVersion}` : `&v=${Date.now()}`;
-      const imagePath = `${serverUrl}/api/fs/image?path=${encodeURIComponent(
-        backgroundSettings.imagePath
-      )}&projectPath=${encodeURIComponent(currentProject.path)}${cacheBuster}`;
+      const cacheBuster = imageVersion ?? Date.now().toString();
+      const imagePath = getAuthenticatedImageUrl(
+        backgroundSettings.imagePath,
+        currentProject.path,
+        cacheBuster
+      );
       setPreviewImage(imagePath);
     } else {
       setPreviewImage(null);
@@ -113,7 +140,7 @@ export function BoardBackgroundModal({ open, onOpenChange }: BoardBackgroundModa
           setPreviewImage(null);
         }
       } catch (error) {
-        console.error('Failed to process image:', error);
+        logger.error('Failed to process image:', error);
         toast.error('Failed to process image');
         setPreviewImage(null);
       } finally {
@@ -185,28 +212,47 @@ export function BoardBackgroundModal({ open, onOpenChange }: BoardBackgroundModa
         toast.error(result.error || 'Failed to clear background image');
       }
     } catch (error) {
-      console.error('Failed to clear background:', error);
+      logger.error('Failed to clear background:', error);
       toast.error('Failed to clear background');
     } finally {
       setIsProcessing(false);
     }
   }, [currentProject, clearBoardBackground]);
 
-  // Live update opacity when sliders change (with persistence)
-  const handleCardOpacityChange = useCallback(
-    async (value: number[]) => {
+  // Live update local state during drag (modal-only, no store update)
+  const handleCardOpacityChange = useCallback((value: number[]) => {
+    setIsDragging(true);
+    setLocalCardOpacity(value[0]);
+  }, []);
+
+  // Update store and persist when slider is released
+  const handleCardOpacityCommit = useCallback(
+    (value: number[]) => {
       if (!currentProject) return;
-      await setCardOpacity(currentProject.path, value[0]);
+      setIsDragging(false);
+      setCardOpacity(currentProject.path, value[0]);
+      const current = getCurrentSettings(currentProject.path);
+      persistSettings(currentProject.path, { ...current, cardOpacity: value[0] });
     },
-    [currentProject, setCardOpacity]
+    [currentProject, setCardOpacity, getCurrentSettings, persistSettings]
   );
 
-  const handleColumnOpacityChange = useCallback(
-    async (value: number[]) => {
+  // Live update local state during drag (modal-only, no store update)
+  const handleColumnOpacityChange = useCallback((value: number[]) => {
+    setIsDragging(true);
+    setLocalColumnOpacity(value[0]);
+  }, []);
+
+  // Update store and persist when slider is released
+  const handleColumnOpacityCommit = useCallback(
+    (value: number[]) => {
       if (!currentProject) return;
-      await setColumnOpacity(currentProject.path, value[0]);
+      setIsDragging(false);
+      setColumnOpacity(currentProject.path, value[0]);
+      const current = getCurrentSettings(currentProject.path);
+      persistSettings(currentProject.path, { ...current, columnOpacity: value[0] });
     },
-    [currentProject, setColumnOpacity]
+    [currentProject, setColumnOpacity, getCurrentSettings, persistSettings]
   );
 
   const handleColumnBorderToggle = useCallback(
@@ -233,12 +279,22 @@ export function BoardBackgroundModal({ open, onOpenChange }: BoardBackgroundModa
     [currentProject, setCardBorderEnabled]
   );
 
-  const handleCardBorderOpacityChange = useCallback(
-    async (value: number[]) => {
+  // Live update local state during drag (modal-only, no store update)
+  const handleCardBorderOpacityChange = useCallback((value: number[]) => {
+    setIsDragging(true);
+    setLocalCardBorderOpacity(value[0]);
+  }, []);
+
+  // Update store and persist when slider is released
+  const handleCardBorderOpacityCommit = useCallback(
+    (value: number[]) => {
       if (!currentProject) return;
-      await setCardBorderOpacity(currentProject.path, value[0]);
+      setIsDragging(false);
+      setCardBorderOpacity(currentProject.path, value[0]);
+      const current = getCurrentSettings(currentProject.path);
+      persistSettings(currentProject.path, { ...current, cardBorderOpacity: value[0] });
     },
-    [currentProject, setCardBorderOpacity]
+    [currentProject, setCardBorderOpacity, getCurrentSettings, persistSettings]
   );
 
   const handleHideScrollbarToggle = useCallback(
@@ -308,7 +364,7 @@ export function BoardBackgroundModal({ open, onOpenChange }: BoardBackgroundModa
                     />
                     {isProcessing && (
                       <div className="absolute inset-0 flex items-center justify-center bg-background/80">
-                        <Loader2 className="w-6 h-6 animate-spin text-brand-500" />
+                        <Spinner size="lg" />
                       </div>
                     )}
                   </div>
@@ -348,7 +404,7 @@ export function BoardBackgroundModal({ open, onOpenChange }: BoardBackgroundModa
                     )}
                   >
                     {isProcessing ? (
-                      <Upload className="h-6 w-6 animate-spin text-muted-foreground" />
+                      <Spinner size="lg" />
                     ) : (
                       <ImageIcon className="h-6 w-6 text-muted-foreground" />
                     )}
@@ -372,11 +428,12 @@ export function BoardBackgroundModal({ open, onOpenChange }: BoardBackgroundModa
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label>Card Opacity</Label>
-                <span className="text-sm text-muted-foreground">{cardOpacity}%</span>
+                <span className="text-sm text-muted-foreground">{localCardOpacity}%</span>
               </div>
               <Slider
-                value={[cardOpacity]}
+                value={[localCardOpacity]}
                 onValueChange={handleCardOpacityChange}
+                onValueCommit={handleCardOpacityCommit}
                 min={0}
                 max={100}
                 step={1}
@@ -387,11 +444,12 @@ export function BoardBackgroundModal({ open, onOpenChange }: BoardBackgroundModa
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label>Column Opacity</Label>
-                <span className="text-sm text-muted-foreground">{columnOpacity}%</span>
+                <span className="text-sm text-muted-foreground">{localColumnOpacity}%</span>
               </div>
               <Slider
-                value={[columnOpacity]}
+                value={[localColumnOpacity]}
                 onValueChange={handleColumnOpacityChange}
+                onValueCommit={handleColumnOpacityCommit}
                 min={0}
                 max={100}
                 step={1}
@@ -440,11 +498,12 @@ export function BoardBackgroundModal({ open, onOpenChange }: BoardBackgroundModa
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <Label>Card Border Opacity</Label>
-                  <span className="text-sm text-muted-foreground">{cardBorderOpacity}%</span>
+                  <span className="text-sm text-muted-foreground">{localCardBorderOpacity}%</span>
                 </div>
                 <Slider
-                  value={[cardBorderOpacity]}
+                  value={[localCardBorderOpacity]}
                   onValueChange={handleCardBorderOpacityChange}
+                  onValueCommit={handleCardBorderOpacityCommit}
                   min={0}
                   max={100}
                   step={1}

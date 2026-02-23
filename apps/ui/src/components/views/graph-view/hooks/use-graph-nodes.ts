@@ -1,7 +1,8 @@
 import { useMemo } from 'react';
 import { Node, Edge } from '@xyflow/react';
 import { Feature } from '@/store/app-store';
-import { getBlockingDependencies } from '@automaker/dependency-resolver';
+import { createFeatureMap, getBlockingDependenciesFromMap } from '@automaker/dependency-resolver';
+import { GRAPH_RENDER_MODE_FULL, type GraphRenderMode } from '../constants';
 import { GraphFilterResult } from './use-graph-filter';
 
 export interface TaskNodeData extends Feature {
@@ -18,6 +19,11 @@ export interface TaskNodeData extends Feature {
   isMatched?: boolean;
   isHighlighted?: boolean;
   isDimmed?: boolean;
+  // Background/theme settings
+  cardOpacity?: number;
+  cardGlassmorphism?: boolean;
+  cardBorderEnabled?: boolean;
+  cardBorderOpacity?: number;
   // Action callbacks
   onViewLogs?: () => void;
   onViewDetails?: () => void;
@@ -26,6 +32,7 @@ export interface TaskNodeData extends Feature {
   onResumeTask?: () => void;
   onSpawnTask?: () => void;
   onDeleteTask?: () => void;
+  renderMode?: GraphRenderMode;
 }
 
 export type TaskNode = Node<TaskNodeData, 'task'>;
@@ -35,6 +42,7 @@ export type DependencyEdge = Edge<{
   isHighlighted?: boolean;
   isDimmed?: boolean;
   onDeleteDependency?: (sourceId: string, targetId: string) => void;
+  renderMode?: GraphRenderMode;
 }>;
 
 export interface NodeActionCallbacks {
@@ -48,11 +56,21 @@ export interface NodeActionCallbacks {
   onDeleteDependency?: (sourceId: string, targetId: string) => void;
 }
 
+interface BackgroundSettings {
+  cardOpacity: number;
+  cardGlassmorphism: boolean;
+  cardBorderEnabled: boolean;
+  cardBorderOpacity: number;
+}
+
 interface UseGraphNodesProps {
   features: Feature[];
   runningAutoTasks: string[];
   filterResult?: GraphFilterResult;
   actionCallbacks?: NodeActionCallbacks;
+  backgroundSettings?: BackgroundSettings;
+  renderMode?: GraphRenderMode;
+  enableEdgeAnimations?: boolean;
 }
 
 /**
@@ -64,14 +82,15 @@ export function useGraphNodes({
   runningAutoTasks,
   filterResult,
   actionCallbacks,
+  backgroundSettings,
+  renderMode = GRAPH_RENDER_MODE_FULL,
+  enableEdgeAnimations = true,
 }: UseGraphNodesProps) {
   const { nodes, edges } = useMemo(() => {
     const nodeList: TaskNode[] = [];
     const edgeList: DependencyEdge[] = [];
-    const featureMap = new Map<string, Feature>();
-
-    // Create feature map for quick lookups
-    features.forEach((f) => featureMap.set(f.id, f));
+    const featureMap = createFeatureMap(features);
+    const runningTaskIds = new Set(runningAutoTasks);
 
     // Extract filter state
     const hasActiveFilter = filterResult?.hasActiveFilter ?? false;
@@ -81,8 +100,8 @@ export function useGraphNodes({
 
     // Create nodes
     features.forEach((feature) => {
-      const isRunning = runningAutoTasks.includes(feature.id);
-      const blockingDeps = getBlockingDependencies(feature, features);
+      const isRunning = runningTaskIds.has(feature.id);
+      const blockingDeps = getBlockingDependenciesFromMap(feature, featureMap);
 
       // Calculate filter highlight states
       const isMatched = hasActiveFilter && matchedNodeIds.has(feature.id);
@@ -102,6 +121,12 @@ export function useGraphNodes({
           isMatched,
           isHighlighted,
           isDimmed,
+          // Background/theme settings
+          cardOpacity: backgroundSettings?.cardOpacity,
+          cardGlassmorphism: backgroundSettings?.cardGlassmorphism,
+          cardBorderEnabled: backgroundSettings?.cardBorderEnabled,
+          cardBorderOpacity: backgroundSettings?.cardBorderOpacity,
+          renderMode,
           // Action callbacks (bound to this feature's ID)
           onViewLogs: actionCallbacks?.onViewLogs
             ? () => actionCallbacks.onViewLogs!(feature.id)
@@ -147,13 +172,14 @@ export function useGraphNodes({
               source: depId,
               target: feature.id,
               type: 'dependency',
-              animated: isRunning || runningAutoTasks.includes(depId),
+              animated: enableEdgeAnimations && (isRunning || runningTaskIds.has(depId)),
               data: {
-                sourceStatus: sourceFeature.status,
+                sourceStatus: sourceFeature.status as Feature['status'],
                 targetStatus: feature.status,
                 isHighlighted: edgeIsHighlighted,
                 isDimmed: edgeIsDimmed,
                 onDeleteDependency: actionCallbacks?.onDeleteDependency,
+                renderMode,
               },
             };
             edgeList.push(edge);
@@ -163,7 +189,7 @@ export function useGraphNodes({
     });
 
     return { nodes: nodeList, edges: edgeList };
-  }, [features, runningAutoTasks, filterResult, actionCallbacks]);
+  }, [features, runningAutoTasks, filterResult, actionCallbacks, backgroundSettings]);
 
   return { nodes, edges };
 }

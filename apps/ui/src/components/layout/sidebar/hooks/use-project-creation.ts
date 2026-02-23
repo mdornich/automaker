@@ -1,24 +1,18 @@
 import { useState, useCallback } from 'react';
+import { createLogger } from '@automaker/utils/logger';
 import { getElectronAPI } from '@/lib/electron';
+
+const logger = createLogger('ProjectCreation');
 import { initializeProject } from '@/lib/project-init';
 import { toast } from 'sonner';
 import type { StarterTemplate } from '@/lib/templates';
-import type { ThemeMode } from '@/store/app-store';
-import type { TrashedProject, Project } from '@/lib/electron';
+import type { Project } from '@/lib/electron';
 
 interface UseProjectCreationProps {
-  trashedProjects: TrashedProject[];
-  currentProject: Project | null;
-  globalTheme: ThemeMode;
-  upsertAndSetCurrentProject: (path: string, name: string, theme: ThemeMode) => Project;
+  upsertAndSetCurrentProject: (path: string, name: string) => Project;
 }
 
-export function useProjectCreation({
-  trashedProjects,
-  currentProject,
-  globalTheme,
-  upsertAndSetCurrentProject,
-}: UseProjectCreationProps) {
+export function useProjectCreation({ upsertAndSetCurrentProject }: UseProjectCreationProps) {
   // Modal state
   const [showNewProjectModal, setShowNewProjectModal] = useState(false);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
@@ -64,14 +58,8 @@ export function useProjectCreation({
 </project_specification>`
         );
 
-        // Determine theme: try trashed project theme, then current project theme, then global
-        const trashedProject = trashedProjects.find((p) => p.path === projectPath);
-        const effectiveTheme =
-          (trashedProject?.theme as ThemeMode | undefined) ||
-          (currentProject?.theme as ThemeMode | undefined) ||
-          globalTheme;
-
-        upsertAndSetCurrentProject(projectPath, projectName, effectiveTheme);
+        // Let the store handle theme (trashed project recovery or undefined for global)
+        upsertAndSetCurrentProject(projectPath, projectName);
 
         setShowNewProjectModal(false);
 
@@ -82,14 +70,14 @@ export function useProjectCreation({
 
         toast.success('Project created successfully');
       } catch (error) {
-        console.error('[ProjectCreation] Failed to finalize project:', error);
+        logger.error('Failed to finalize project:', error);
         toast.error('Failed to initialize project', {
           description: error instanceof Error ? error.message : 'Unknown error',
         });
         throw error;
       }
     },
-    [trashedProjects, currentProject, globalTheme, upsertAndSetCurrentProject]
+    [upsertAndSetCurrentProject]
   );
 
   /**
@@ -108,7 +96,7 @@ export function useProjectCreation({
         // Finalize project setup
         await finalizeProjectCreation(projectPath, projectName);
       } catch (error) {
-        console.error('[ProjectCreation] Failed to create blank project:', error);
+        logger.error('Failed to create blank project:', error);
         toast.error('Failed to create project', {
           description: error instanceof Error ? error.message : 'Unknown error',
         });
@@ -129,6 +117,9 @@ export function useProjectCreation({
         const api = getElectronAPI();
 
         // Clone template repository
+        if (!api.templates) {
+          throw new Error('Templates API is not available');
+        }
         const cloneResult = await api.templates.clone(template.repoUrl, projectName, parentDir);
         if (!cloneResult.success) {
           throw new Error(cloneResult.error || 'Failed to clone template');
@@ -163,14 +154,8 @@ export function useProjectCreation({
 </project_specification>`
         );
 
-        // Determine theme
-        const trashedProject = trashedProjects.find((p) => p.path === projectPath);
-        const effectiveTheme =
-          (trashedProject?.theme as ThemeMode | undefined) ||
-          (currentProject?.theme as ThemeMode | undefined) ||
-          globalTheme;
-
-        upsertAndSetCurrentProject(projectPath, projectName, effectiveTheme);
+        // Let the store handle theme (trashed project recovery or undefined for global)
+        upsertAndSetCurrentProject(projectPath, projectName);
         setShowNewProjectModal(false);
         setNewProjectName(projectName);
         setNewProjectPath(projectPath);
@@ -180,7 +165,7 @@ export function useProjectCreation({
           description: `Created ${projectName} from ${template.name}`,
         });
       } catch (error) {
-        console.error('[ProjectCreation] Failed to create from template:', error);
+        logger.error('Failed to create from template:', error);
         toast.error('Failed to create project from template', {
           description: error instanceof Error ? error.message : 'Unknown error',
         });
@@ -188,7 +173,7 @@ export function useProjectCreation({
         setIsCreatingProject(false);
       }
     },
-    [trashedProjects, currentProject, globalTheme, upsertAndSetCurrentProject]
+    [upsertAndSetCurrentProject]
   );
 
   /**
@@ -201,6 +186,9 @@ export function useProjectCreation({
         const api = getElectronAPI();
 
         // Clone custom repository
+        if (!api.templates) {
+          throw new Error('Templates API is not available');
+        }
         const cloneResult = await api.templates.clone(repoUrl, projectName, parentDir);
         if (!cloneResult.success) {
           throw new Error(cloneResult.error || 'Failed to clone repository');
@@ -235,14 +223,8 @@ export function useProjectCreation({
 </project_specification>`
         );
 
-        // Determine theme
-        const trashedProject = trashedProjects.find((p) => p.path === projectPath);
-        const effectiveTheme =
-          (trashedProject?.theme as ThemeMode | undefined) ||
-          (currentProject?.theme as ThemeMode | undefined) ||
-          globalTheme;
-
-        upsertAndSetCurrentProject(projectPath, projectName, effectiveTheme);
+        // Let the store handle theme (trashed project recovery or undefined for global)
+        upsertAndSetCurrentProject(projectPath, projectName);
         setShowNewProjectModal(false);
         setNewProjectName(projectName);
         setNewProjectPath(projectPath);
@@ -252,7 +234,7 @@ export function useProjectCreation({
           description: `Created ${projectName} from ${repoUrl}`,
         });
       } catch (error) {
-        console.error('[ProjectCreation] Failed to create from custom URL:', error);
+        logger.error('Failed to create from custom URL:', error);
         toast.error('Failed to create project from URL', {
           description: error instanceof Error ? error.message : 'Unknown error',
         });
@@ -260,7 +242,7 @@ export function useProjectCreation({
         setIsCreatingProject(false);
       }
     },
-    [trashedProjects, currentProject, globalTheme, upsertAndSetCurrentProject]
+    [upsertAndSetCurrentProject]
   );
 
   return {

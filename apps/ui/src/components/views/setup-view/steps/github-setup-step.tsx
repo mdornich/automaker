@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
+import { createLogger } from '@automaker/utils/logger';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useSetupStore } from '@/store/setup-store';
 import { getElectronAPI } from '@/lib/electron';
 import {
   CheckCircle2,
-  Loader2,
   ArrowRight,
   ArrowLeft,
   ExternalLink,
@@ -15,8 +15,11 @@ import {
   Github,
   XCircle,
 } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import { toast } from 'sonner';
 import { StatusBadge } from '../components';
+
+const logger = createLogger('GitHubSetupStep');
 
 interface GitHubSetupStepProps {
   onNext: () => void;
@@ -46,7 +49,7 @@ export function GitHubSetupStep({ onNext, onBack, onSkip }: GitHubSetupStepProps
         });
       }
     } catch (error) {
-      console.error('Failed to check gh status:', error);
+      logger.error('Failed to check gh status:', error);
     } finally {
       setIsChecking(false);
     }
@@ -113,7 +116,7 @@ export function GitHubSetupStep({ onNext, onBack, onSkip }: GitHubSetupStepProps
             <div className="flex items-center gap-2">
               {getStatusBadge()}
               <Button variant="ghost" size="sm" onClick={checkStatus} disabled={isChecking}>
-                <RefreshCw className={`w-4 h-4 ${isChecking ? 'animate-spin' : ''}`} />
+                {isChecking ? <Spinner size="sm" /> : <RefreshCw className="w-4 h-4" />}
               </Button>
             </div>
           </div>
@@ -249,7 +252,7 @@ export function GitHubSetupStep({ onNext, onBack, onSkip }: GitHubSetupStepProps
           {/* Loading State */}
           {isChecking && (
             <div className="flex items-center gap-3 p-4 rounded-lg bg-blue-500/10 border border-blue-500/20">
-              <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />
+              <Spinner size="md" />
               <div>
                 <p className="font-medium text-foreground">Checking GitHub CLI status...</p>
               </div>

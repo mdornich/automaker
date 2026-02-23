@@ -5,17 +5,28 @@
 import type { Request, Response } from 'express';
 import type { BacklogPlanResult, BacklogChange, Feature } from '@automaker/types';
 import { FeatureLoader } from '../../../services/feature-loader.js';
-import { getErrorMessage, logError, logger } from '../common.js';
+import { clearBacklogPlan, getErrorMessage, logError, logger } from '../common.js';
 
 const featureLoader = new FeatureLoader();
 
 export function createApplyHandler() {
   return async (req: Request, res: Response): Promise<void> => {
     try {
-      const { projectPath, plan } = req.body as {
+      const {
+        projectPath,
+        plan,
+        branchName: rawBranchName,
+      } = req.body as {
         projectPath: string;
         plan: BacklogPlanResult;
+        branchName?: string;
       };
+
+      // Validate branchName: must be undefined or a non-empty trimmed string
+      const branchName =
+        typeof rawBranchName === 'string' && rawBranchName.trim().length > 0
+          ? rawBranchName.trim()
+          : undefined;
 
       if (!projectPath) {
         res.status(400).json({ success: false, error: 'projectPath required' });
@@ -74,14 +85,16 @@ export function createApplyHandler() {
         if (!change.feature) continue;
 
         try {
-          // Create the new feature
+          // Create the new feature - use the AI-generated ID if provided
           const newFeature = await featureLoader.create(projectPath, {
+            id: change.feature.id, // Use descriptive ID from AI if provided
             title: change.feature.title,
             description: change.feature.description || '',
             category: change.feature.category || 'Uncategorized',
             dependencies: change.feature.dependencies,
             priority: change.feature.priority,
             status: 'backlog',
+            branchName,
           });
 
           appliedChanges.push(`added:${newFeature.id}`);
@@ -133,6 +146,17 @@ export function createApplyHandler() {
             );
           }
         }
+      }
+
+      // Clear the plan before responding
+      try {
+        await clearBacklogPlan(projectPath);
+      } catch (error) {
+        logger.warn(
+          `[BacklogPlan] Failed to clear backlog plan after apply:`,
+          getErrorMessage(error)
+        );
+        // Don't throw - operation succeeded, just cleanup failed
       }
 
       res.json({

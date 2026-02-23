@@ -1,16 +1,20 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { createLogger } from '@automaker/utils/logger';
 import { useAppStore, Feature } from '@/store/app-store';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Bot, Send, User, Loader2, Sparkles, FileText, ArrowLeft, CheckCircle } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { Bot, Send, User, Sparkles, FileText, ArrowLeft, CheckCircle } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
+import { cn, generateUUID } from '@/lib/utils';
 import { getElectronAPI } from '@/lib/electron';
 import { Markdown } from '@/components/ui/markdown';
 import { useFileBrowser } from '@/contexts/file-browser-context';
 import { toast } from 'sonner';
 import { useNavigate } from '@tanstack/react-router';
 import { getDefaultWorkspaceDirectory, saveLastProjectDirectory } from '@/lib/workspace-config';
+
+const logger = createLogger('InterviewView');
 
 interface InterviewMessage {
   id: string;
@@ -97,7 +101,7 @@ export function InterviewView() {
           setProjectPath(defaultDir);
         }
       } catch (error) {
-        console.error('Failed to load default workspace directory:', error);
+        logger.error('Failed to load default workspace directory:', error);
       }
     };
 
@@ -319,7 +323,7 @@ export function InterviewView() {
       const api = getElectronAPI();
       // Use platform-specific path separator
       const pathSep =
-        typeof window !== 'undefined' && (window as any).electronAPI
+        typeof window !== 'undefined' && window.electronAPI
           ? navigator.platform.indexOf('Win') !== -1
             ? '\\'
             : '/'
@@ -341,11 +345,12 @@ export function InterviewView() {
 
       // Create initial feature in the features folder
       const initialFeature: Feature = {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         category: 'Core',
         description: 'Initial project setup',
-        status: 'backlog' as const,
+        status: 'backlog',
         skipTests: true,
+        steps: [],
       };
 
       if (!api.features) {
@@ -367,7 +372,7 @@ export function InterviewView() {
       addProject(project);
       setCurrentProject(project);
     } catch (error) {
-      console.error('Failed to create project:', error);
+      logger.error('Failed to create project:', error);
       setIsGenerating(false);
     }
   };
@@ -487,7 +492,7 @@ export function InterviewView() {
             <Card className="border border-primary/30 bg-card">
               <CardContent className="p-3">
                 <div className="flex items-center gap-2">
-                  <Loader2 className="w-4 h-4 animate-spin text-primary" />
+                  <Spinner size="sm" />
                   <span className="text-sm text-primary">Generating specification...</span>
                 </div>
               </CardContent>
@@ -567,7 +572,7 @@ export function InterviewView() {
                   >
                     {isGenerating ? (
                       <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        <Spinner size="sm" variant="foreground" className="mr-2" />
                         Creating...
                       </>
                     ) : (

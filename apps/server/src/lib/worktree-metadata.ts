@@ -5,22 +5,24 @@
 
 import * as secureFs from './secure-fs.js';
 import * as path from 'path';
+import type { PRState, WorktreePRInfo } from '@automaker/types';
+
+// Re-export types for backwards compatibility
+export type { PRState, WorktreePRInfo };
 
 /** Maximum length for sanitized branch names in filesystem paths */
 const MAX_SANITIZED_BRANCH_PATH_LENGTH = 200;
-
-export interface WorktreePRInfo {
-  number: number;
-  url: string;
-  title: string;
-  state: string;
-  createdAt: string;
-}
 
 export interface WorktreeMetadata {
   branch: string;
   createdAt: string;
   pr?: WorktreePRInfo;
+  /** Whether the init script has been executed for this worktree */
+  initScriptRan?: boolean;
+  /** Status of the init script execution */
+  initScriptStatus?: 'running' | 'success' | 'failed';
+  /** Error message if init script failed */
+  initScriptError?: string;
 }
 
 /**

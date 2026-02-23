@@ -1,4 +1,5 @@
-import { Sparkles, Clock, Loader2 } from 'lucide-react';
+import { Sparkles, Clock } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import {
   Dialog,
   DialogContent,
@@ -50,7 +51,7 @@ export function CreateSpecDialog({
           <DialogDescription className="text-muted-foreground">{description}</DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-4">
+        <div className="space-y-4 py-4 overflow-y-auto">
           <div className="space-y-2">
             <label className="text-sm font-medium">Project Overview</label>
             <p className="text-xs text-muted-foreground">
@@ -163,7 +164,7 @@ export function CreateSpecDialog({
           >
             {isCreatingSpec ? (
               <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                <Spinner size="sm" className="mr-2" />
                 Generating...
               </>
             ) : (

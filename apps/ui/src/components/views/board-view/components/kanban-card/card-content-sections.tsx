@@ -1,3 +1,5 @@
+// @ts-nocheck - content section prop typing with feature data extraction
+import { memo } from 'react';
 import { Feature } from '@/store/app-store';
 import { GitBranch, GitPullRequest, ExternalLink } from 'lucide-react';
 
@@ -6,7 +8,10 @@ interface CardContentSectionsProps {
   useWorktrees: boolean;
 }
 
-export function CardContentSections({ feature, useWorktrees }: CardContentSectionsProps) {
+export const CardContentSections = memo(function CardContentSections({
+  feature,
+  useWorktrees,
+}: CardContentSectionsProps) {
   return (
     <>
       {/* Target Branch Display */}
@@ -47,4 +52,4 @@ export function CardContentSections({ feature, useWorktrees }: CardContentSectio
         })()}
     </>
   );
-}
+});

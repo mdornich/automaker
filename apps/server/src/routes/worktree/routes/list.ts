@@ -2,18 +2,52 @@
  * POST /list endpoint - List all git worktrees
  *
  * Returns actual git worktrees from `git worktree list`.
+ * Also scans .worktrees/ directory to discover worktrees that may have been
+ * created externally or whose git state was corrupted.
  * Does NOT include tracked branches - only real worktrees with separate directories.
  */
 
 import type { Request, Response } from 'express';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import path from 'path';
 import * as secureFs from '../../../lib/secure-fs.js';
 import { isGitRepo } from '@automaker/git-utils';
-import { getErrorMessage, logError, normalizePath } from '../common.js';
-import { readAllWorktreeMetadata, type WorktreePRInfo } from '../../../lib/worktree-metadata.js';
+import { getErrorMessage, logError, normalizePath, execEnv, isGhCliAvailable } from '../common.js';
+import {
+  readAllWorktreeMetadata,
+  updateWorktreePRInfo,
+  type WorktreePRInfo,
+} from '../../../lib/worktree-metadata.js';
+import { createLogger } from '@automaker/utils';
+import { validatePRState } from '@automaker/types';
+import {
+  checkGitHubRemote,
+  type GitHubRemoteStatus,
+} from '../../github/routes/check-github-remote.js';
 
 const execAsync = promisify(exec);
+const logger = createLogger('Worktree');
+
+/**
+ * Cache for GitHub remote status per project path.
+ * This prevents repeated "no git remotes found" warnings when polling
+ * projects that don't have a GitHub remote configured.
+ */
+interface GitHubRemoteCacheEntry {
+  status: GitHubRemoteStatus;
+  checkedAt: number;
+}
+
+interface GitHubPRCacheEntry {
+  prs: Map<string, WorktreePRInfo>;
+  fetchedAt: number;
+}
+
+const githubRemoteCache = new Map<string, GitHubRemoteCacheEntry>();
+const githubPRCache = new Map<string, GitHubPRCacheEntry>();
+const GITHUB_REMOTE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const GITHUB_PR_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes - avoid hitting GitHub on every poll
 
 interface WorktreeInfo {
   path: string;
@@ -35,17 +69,221 @@ async function getCurrentBranch(cwd: string): Promise<string> {
   }
 }
 
+/**
+ * Scan the .worktrees directory to discover worktrees that may exist on disk
+ * but are not registered with git (e.g., created externally or corrupted state).
+ */
+async function scanWorktreesDirectory(
+  projectPath: string,
+  knownWorktreePaths: Set<string>
+): Promise<Array<{ path: string; branch: string }>> {
+  const discovered: Array<{ path: string; branch: string }> = [];
+  const worktreesDir = path.join(projectPath, '.worktrees');
+
+  try {
+    // Check if .worktrees directory exists
+    await secureFs.access(worktreesDir);
+  } catch {
+    // .worktrees directory doesn't exist
+    return discovered;
+  }
+
+  try {
+    const entries = await secureFs.readdir(worktreesDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const worktreePath = path.join(worktreesDir, entry.name);
+      const normalizedPath = normalizePath(worktreePath);
+
+      // Skip if already known from git worktree list
+      if (knownWorktreePaths.has(normalizedPath)) continue;
+
+      // Check if this is a valid git repository
+      const gitPath = path.join(worktreePath, '.git');
+      try {
+        const gitStat = await secureFs.stat(gitPath);
+
+        // Git worktrees have a .git FILE (not directory) that points to the parent repo
+        // Regular repos have a .git DIRECTORY
+        if (gitStat.isFile() || gitStat.isDirectory()) {
+          // Try to get the branch name
+          const branch = await getCurrentBranch(worktreePath);
+          if (branch) {
+            logger.info(
+              `Discovered worktree in .worktrees/ not in git worktree list: ${entry.name} (branch: ${branch})`
+            );
+            discovered.push({
+              path: normalizedPath,
+              branch,
+            });
+          } else {
+            // Try to get branch from HEAD if branch --show-current fails (detached HEAD)
+            try {
+              const { stdout: headRef } = await execAsync('git rev-parse --abbrev-ref HEAD', {
+                cwd: worktreePath,
+              });
+              const headBranch = headRef.trim();
+              if (headBranch && headBranch !== 'HEAD') {
+                logger.info(
+                  `Discovered worktree in .worktrees/ not in git worktree list: ${entry.name} (branch: ${headBranch})`
+                );
+                discovered.push({
+                  path: normalizedPath,
+                  branch: headBranch,
+                });
+              }
+            } catch {
+              // Can't determine branch, skip this directory
+            }
+          }
+        }
+      } catch {
+        // Not a git repo, skip
+      }
+    }
+  } catch (error) {
+    logger.warn(`Failed to scan .worktrees directory: ${getErrorMessage(error)}`);
+  }
+
+  return discovered;
+}
+
+/**
+ * Get cached GitHub remote status for a project, or check and cache it.
+ * Returns null if gh CLI is not available.
+ */
+async function getGitHubRemoteStatus(projectPath: string): Promise<GitHubRemoteStatus | null> {
+  // Check if gh CLI is available first
+  const ghAvailable = await isGhCliAvailable();
+  if (!ghAvailable) {
+    return null;
+  }
+
+  const now = Date.now();
+  const cached = githubRemoteCache.get(projectPath);
+
+  // Return cached result if still valid
+  if (cached && now - cached.checkedAt < GITHUB_REMOTE_CACHE_TTL_MS) {
+    return cached.status;
+  }
+
+  // Check GitHub remote and cache the result
+  const status = await checkGitHubRemote(projectPath);
+  githubRemoteCache.set(projectPath, {
+    status,
+    checkedAt: Date.now(),
+  });
+
+  return status;
+}
+
+/**
+ * Fetch all PRs from GitHub and create a map of branch name to PR info.
+ * Uses --state all to include merged/closed PRs, allowing detection of
+ * state changes (e.g., when a PR is merged on GitHub).
+ *
+ * This also allows detecting PRs that were created outside the app.
+ *
+ * Uses cached GitHub remote status to avoid repeated warnings when the
+ * project doesn't have a GitHub remote configured. Results are cached
+ * briefly to avoid hammering GitHub on frequent worktree polls.
+ */
+async function fetchGitHubPRs(
+  projectPath: string,
+  forceRefresh = false
+): Promise<Map<string, WorktreePRInfo>> {
+  const now = Date.now();
+  const cached = githubPRCache.get(projectPath);
+
+  // Return cached result if valid and not forcing refresh
+  if (!forceRefresh && cached && now - cached.fetchedAt < GITHUB_PR_CACHE_TTL_MS) {
+    return cached.prs;
+  }
+
+  const prMap = new Map<string, WorktreePRInfo>();
+
+  try {
+    // Check GitHub remote status (uses cache to avoid repeated warnings)
+    const remoteStatus = await getGitHubRemoteStatus(projectPath);
+
+    // If gh CLI not available or no GitHub remote, return empty silently
+    if (!remoteStatus || !remoteStatus.hasGitHubRemote) {
+      return prMap;
+    }
+
+    // Use -R flag with owner/repo for more reliable PR fetching
+    const repoFlag =
+      remoteStatus.owner && remoteStatus.repo
+        ? `-R ${remoteStatus.owner}/${remoteStatus.repo}`
+        : '';
+
+    // Fetch all PRs from GitHub (including merged/closed to detect state changes)
+    const { stdout } = await execAsync(
+      `gh pr list ${repoFlag} --state all --json number,title,url,state,headRefName,createdAt --limit 1000`,
+      { cwd: projectPath, env: execEnv, timeout: 15000 }
+    );
+
+    const prs = JSON.parse(stdout || '[]') as Array<{
+      number: number;
+      title: string;
+      url: string;
+      state: string;
+      headRefName: string;
+      createdAt: string;
+    }>;
+
+    for (const pr of prs) {
+      prMap.set(pr.headRefName, {
+        number: pr.number,
+        url: pr.url,
+        title: pr.title,
+        // GitHub CLI returns state as uppercase: OPEN, MERGED, CLOSED
+        state: validatePRState(pr.state),
+        createdAt: pr.createdAt,
+      });
+    }
+
+    // Only update cache on successful fetch
+    githubPRCache.set(projectPath, {
+      prs: prMap,
+      fetchedAt: Date.now(),
+    });
+  } catch (error) {
+    // On fetch failure, return stale cached data if available to avoid
+    // repeated API calls during GitHub API flakiness or temporary outages
+    if (cached) {
+      logger.warn(`Failed to fetch GitHub PRs, returning stale cache: ${getErrorMessage(error)}`);
+      // Extend cache TTL to avoid repeated retries during outages
+      githubPRCache.set(projectPath, { prs: cached.prs, fetchedAt: Date.now() });
+      return cached.prs;
+    }
+    // No cache available, log warning and return empty map
+    logger.warn(`Failed to fetch GitHub PRs: ${getErrorMessage(error)}`);
+  }
+
+  return prMap;
+}
+
 export function createListHandler() {
   return async (req: Request, res: Response): Promise<void> => {
     try {
-      const { projectPath, includeDetails } = req.body as {
+      const { projectPath, includeDetails, forceRefreshGitHub } = req.body as {
         projectPath: string;
         includeDetails?: boolean;
+        forceRefreshGitHub?: boolean;
       };
 
       if (!projectPath) {
         res.status(400).json({ success: false, error: 'projectPath required' });
         return;
+      }
+
+      // Clear GitHub remote cache if force refresh requested
+      // This allows users to re-check for GitHub remote after adding one
+      if (forceRefreshGitHub) {
+        githubRemoteCache.delete(projectPath);
       }
 
       if (!(await isGitRepo(projectPath))) {
@@ -116,6 +354,22 @@ export function createListHandler() {
         }
       }
 
+      // Scan .worktrees directory to discover worktrees that exist on disk
+      // but are not registered with git (e.g., created externally)
+      const knownPaths = new Set(worktrees.map((w) => w.path));
+      const discoveredWorktrees = await scanWorktreesDirectory(projectPath, knownPaths);
+
+      // Add discovered worktrees to the list
+      for (const discovered of discoveredWorktrees) {
+        worktrees.push({
+          path: discovered.path,
+          branch: discovered.branch,
+          isMain: false,
+          isCurrent: discovered.branch === currentBranch,
+          hasWorktree: true,
+        });
+      }
+
       // Read all worktree metadata to get PR info
       const allMetadata = await readAllWorktreeMetadata(projectPath);
 
@@ -139,10 +393,42 @@ export function createListHandler() {
         }
       }
 
-      // Add PR info from metadata for each worktree
+      // Assign PR info to each worktree, preferring fresh GitHub data over cached metadata.
+      // Only fetch GitHub PRs if includeDetails is requested (performance optimization).
+      // Uses --state all to detect merged/closed PRs, limited to 1000 recent PRs.
+      const githubPRs = includeDetails
+        ? await fetchGitHubPRs(projectPath, forceRefreshGitHub)
+        : new Map<string, WorktreePRInfo>();
+
       for (const worktree of worktrees) {
+        // Skip PR assignment for the main worktree - it's not meaningful to show
+        // PRs on the main branch tab, and can be confusing if someone created
+        // a PR from main to another branch
+        if (worktree.isMain) {
+          continue;
+        }
+
         const metadata = allMetadata.get(worktree.branch);
-        if (metadata?.pr) {
+        const githubPR = githubPRs.get(worktree.branch);
+
+        if (githubPR) {
+          // Prefer fresh GitHub data (it has the current state)
+          worktree.pr = githubPR;
+
+          // Sync metadata with GitHub state when:
+          // 1. No metadata exists for this PR (PR created externally)
+          // 2. State has changed (e.g., merged/closed on GitHub)
+          const needsSync = !metadata?.pr || metadata.pr.state !== githubPR.state;
+          if (needsSync) {
+            // Fire and forget - don't block the response
+            updateWorktreePRInfo(projectPath, worktree.branch, githubPR).catch((err) => {
+              logger.warn(
+                `Failed to update PR info for ${worktree.branch}: ${getErrorMessage(err)}`
+              );
+            });
+          }
+        } else if (metadata?.pr && metadata.pr.state === 'OPEN') {
+          // Fall back to stored metadata only if the PR is still OPEN
           worktree.pr = metadata.pr;
         }
       }

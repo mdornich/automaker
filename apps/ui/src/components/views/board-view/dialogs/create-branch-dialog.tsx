@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { createLogger } from '@automaker/utils/logger';
 import {
   Dialog,
   DialogContent,
@@ -12,7 +13,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { getElectronAPI } from '@/lib/electron';
 import { toast } from 'sonner';
-import { GitBranchPlus, Loader2 } from 'lucide-react';
+import { GitBranchPlus } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 
 interface WorktreeInfo {
   path: string;
@@ -21,6 +23,8 @@ interface WorktreeInfo {
   hasChanges?: boolean;
   changedFilesCount?: number;
 }
+
+const logger = createLogger('CreateBranchDialog');
 
 interface CreateBranchDialogProps {
   open: boolean;
@@ -77,7 +81,7 @@ export function CreateBranchDialog({
         setError(result.error || 'Failed to create branch');
       }
     } catch (err) {
-      console.error('Create branch failed:', err);
+      logger.error('Create branch failed:', err);
       setError('Failed to create branch');
     } finally {
       setIsCreating(false);
@@ -130,7 +134,7 @@ export function CreateBranchDialog({
           <Button onClick={handleCreate} disabled={!branchName.trim() || isCreating}>
             {isCreating ? (
               <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                <Spinner size="sm" className="mr-2" />
                 Creating...
               </>
             ) : (

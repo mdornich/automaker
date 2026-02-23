@@ -1,6 +1,7 @@
 import { PanelLeft, PanelLeftClose } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { formatShortcut } from '@/store/app-store';
+import { useIsCompact } from '@/hooks/use-media-query';
 
 interface CollapseToggleButtonProps {
   sidebarOpen: boolean;
@@ -13,11 +14,18 @@ export function CollapseToggleButton({
   toggleSidebar,
   shortcut,
 }: CollapseToggleButtonProps) {
+  const isCompact = useIsCompact();
+
+  // Hide when in compact mode (mobile menu is shown in board header)
+  if (isCompact) {
+    return null;
+  }
+
   return (
     <button
       onClick={toggleSidebar}
       className={cn(
-        'hidden lg:flex absolute top-[68px] -right-3 z-9999',
+        'flex absolute top-[40px] -right-3.5 z-9999',
         'group/toggle items-center justify-center w-7 h-7 rounded-full',
         // Glass morphism button
         'bg-card/95 backdrop-blur-sm border border-border/80',

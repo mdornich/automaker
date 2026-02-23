@@ -11,7 +11,7 @@ interface ThemeStepProps {
 }
 
 export function ThemeStep({ onNext, onBack }: ThemeStepProps) {
-  const { theme, setTheme, setPreviewTheme } = useAppStore();
+  const { theme, setTheme, setPreviewTheme, currentProject, setProjectTheme } = useAppStore();
   const [activeTab, setActiveTab] = useState<'dark' | 'light'>('dark');
 
   const handleThemeHover = (themeValue: string) => {
@@ -24,6 +24,11 @@ export function ThemeStep({ onNext, onBack }: ThemeStepProps) {
 
   const handleThemeClick = (themeValue: string) => {
     setTheme(themeValue as typeof theme);
+    // Clear the current project's theme so it uses the global theme
+    // This ensures "Use Global Theme" is checked and the project inherits the global theme
+    if (currentProject && currentProject.theme !== undefined) {
+      setProjectTheme(currentProject.id, null);
+    }
     setPreviewTheme(null);
   };
 

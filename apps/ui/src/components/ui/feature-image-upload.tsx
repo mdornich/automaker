@@ -1,6 +1,10 @@
 import React, { useState, useRef, useCallback } from 'react';
+import { createLogger } from '@automaker/utils/logger';
 import { cn } from '@/lib/utils';
-import { ImageIcon, X, Upload } from 'lucide-react';
+
+const logger = createLogger('FeatureImageUpload');
+import { ImageIcon, X } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import {
   fileToBase64,
   generateImageId,
@@ -77,7 +81,7 @@ export function FeatureImageUpload({
       }
 
       if (errors.length > 0) {
-        console.warn('Image upload errors:', errors);
+        logger.warn('Image upload errors:', errors);
       }
 
       if (newImages.length > 0) {
@@ -193,7 +197,7 @@ export function FeatureImageUpload({
             )}
           >
             {isProcessing ? (
-              <Upload className="h-5 w-5 animate-spin text-muted-foreground" />
+              <Spinner size="md" />
             ) : (
               <ImageIcon className="h-5 w-5 text-muted-foreground" />
             )}

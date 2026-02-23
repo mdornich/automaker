@@ -15,10 +15,11 @@ const execAsync = promisify(exec);
 export function createFileDiffHandler() {
   return async (req: Request, res: Response): Promise<void> => {
     try {
-      const { projectPath, featureId, filePath } = req.body as {
+      const { projectPath, featureId, filePath, useWorktrees } = req.body as {
         projectPath: string;
         featureId: string;
         filePath: string;
+        useWorktrees?: boolean;
       };
 
       if (!projectPath || !featureId || !filePath) {
@@ -29,8 +30,17 @@ export function createFileDiffHandler() {
         return;
       }
 
+      // If worktrees aren't enabled, don't probe .worktrees at all.
+      if (useWorktrees === false) {
+        res.json({ success: true, diff: '', filePath });
+        return;
+      }
+
       // Git worktrees are stored in project directory
-      const worktreePath = path.join(projectPath, '.worktrees', featureId);
+      // Sanitize featureId the same way it's sanitized when creating worktrees
+      // (see create.ts: branchName.replace(/[^a-zA-Z0-9_-]/g, '-'))
+      const sanitizedFeatureId = featureId.replace(/[^a-zA-Z0-9_-]/g, '-');
+      const worktreePath = path.join(projectPath, '.worktrees', sanitizedFeatureId);
 
       try {
         await secureFs.access(worktreePath);
@@ -57,7 +67,11 @@ export function createFileDiffHandler() {
 
         res.json({ success: true, diff, filePath });
       } catch (innerError) {
-        logError(innerError, 'Worktree file diff failed');
+        const code = (innerError as NodeJS.ErrnoException | undefined)?.code;
+        // ENOENT is expected when a feature has no worktree; don't log as an error.
+        if (code && code !== 'ENOENT') {
+          logError(innerError, 'Worktree file diff failed');
+        }
         res.json({ success: true, diff: '', filePath });
       }
     } catch (error) {

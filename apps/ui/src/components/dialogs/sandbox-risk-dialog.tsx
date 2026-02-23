@@ -6,7 +6,7 @@
  */
 
 import { useState } from 'react';
-import { ShieldAlert, Copy, Check } from 'lucide-react';
+import { ShieldAlert } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -16,26 +16,22 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Label } from '@/components/ui/label';
 
 interface SandboxRiskDialogProps {
   open: boolean;
-  onConfirm: () => void;
+  onConfirm: (skipInFuture: boolean) => void;
   onDeny: () => void;
 }
 
-const DOCKER_COMMAND = 'npm run dev:docker';
-
 export function SandboxRiskDialog({ open, onConfirm, onDeny }: SandboxRiskDialogProps) {
-  const [copied, setCopied] = useState(false);
+  const [skipInFuture, setSkipInFuture] = useState(false);
 
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(DOCKER_COMMAND);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error('Failed to copy:', err);
-    }
+  const handleConfirm = () => {
+    onConfirm(skipInFuture);
+    // Reset checkbox state after confirmation
+    setSkipInFuture(false);
   };
 
   return (
@@ -69,42 +65,42 @@ export function SandboxRiskDialog({ open, onConfirm, onDeny }: SandboxRiskDialog
                 </ul>
               </div>
 
-              <div className="space-y-2">
-                <p className="text-sm text-muted-foreground">
-                  For safer operation, consider running Automaker in Docker:
-                </p>
-                <div className="flex items-center gap-2 bg-muted/50 border border-border rounded-lg p-2">
-                  <code className="flex-1 text-sm font-mono px-2">{DOCKER_COMMAND}</code>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={handleCopy}
-                    className="h-8 px-2 hover:bg-muted"
-                  >
-                    {copied ? (
-                      <Check className="w-4 h-4 text-green-500" />
-                    ) : (
-                      <Copy className="w-4 h-4" />
-                    )}
-                  </Button>
-                </div>
-              </div>
+              <p className="text-sm text-muted-foreground">
+                For safer operation, consider running Automaker in Docker. See the README for
+                instructions.
+              </p>
             </div>
           </DialogDescription>
         </DialogHeader>
 
-        <DialogFooter className="gap-2 sm:gap-2 pt-4">
-          <Button variant="outline" onClick={onDeny} className="px-4" data-testid="sandbox-deny">
-            Deny &amp; Exit
-          </Button>
-          <Button
-            variant="destructive"
-            onClick={onConfirm}
-            className="px-4"
-            data-testid="sandbox-confirm"
-          >
-            <ShieldAlert className="w-4 h-4 mr-2" />I Accept the Risks
-          </Button>
+        <DialogFooter className="flex-col gap-4 sm:flex-col pt-4">
+          <div className="flex items-center space-x-2 self-start">
+            <Checkbox
+              id="skip-sandbox-warning"
+              checked={skipInFuture}
+              onCheckedChange={(checked) => setSkipInFuture(checked === true)}
+              data-testid="sandbox-skip-checkbox"
+            />
+            <Label
+              htmlFor="skip-sandbox-warning"
+              className="text-sm text-muted-foreground cursor-pointer"
+            >
+              Do not show this warning again
+            </Label>
+          </div>
+          <div className="flex gap-2 sm:gap-2 w-full sm:justify-end">
+            <Button variant="outline" onClick={onDeny} className="px-4" data-testid="sandbox-deny">
+              Deny &amp; Exit
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleConfirm}
+              className="px-4"
+              data-testid="sandbox-confirm"
+            >
+              <ShieldAlert className="w-4 h-4 mr-2" />I Accept the Risks
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

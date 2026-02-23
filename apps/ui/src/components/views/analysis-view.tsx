@@ -1,6 +1,9 @@
 import { useCallback, useState } from 'react';
-import { useAppStore, FileTreeNode, ProjectAnalysis } from '@/store/app-store';
+import { createLogger } from '@automaker/utils/logger';
+import { useQueryClient } from '@tanstack/react-query';
+import { useAppStore, FileTreeNode, ProjectAnalysis, Feature } from '@/store/app-store';
 import { getElectronAPI } from '@/lib/electron';
+import { queryKeys } from '@/lib/query-keys';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import {
@@ -13,13 +16,15 @@ import {
   RefreshCw,
   BarChart3,
   FileCode,
-  Loader2,
   FileText,
   CheckCircle,
   AlertCircle,
   ListChecks,
 } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { Spinner } from '@/components/ui/spinner';
+import { cn, generateUUID } from '@/lib/utils';
+
+const logger = createLogger('AnalysisView');
 
 const IGNORE_PATTERNS = [
   'node_modules',
@@ -69,6 +74,7 @@ export function AnalysisView() {
   const [isGeneratingFeatureList, setIsGeneratingFeatureList] = useState(false);
   const [featureListGenerated, setFeatureListGenerated] = useState(false);
   const [featureListError, setFeatureListError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   // Recursively scan directory
   const scanDirectory = useCallback(
@@ -109,7 +115,7 @@ export function AnalysisView() {
 
         return nodes;
       } catch (error) {
-        console.error('Failed to scan directory:', path, error);
+        logger.error('Failed to scan directory:', path, error);
         return [];
       }
     },
@@ -165,7 +171,7 @@ export function AnalysisView() {
 
       setProjectAnalysis(analysis);
     } catch (error) {
-      console.error('Analysis failed:', error);
+      logger.error('Analysis failed:', error);
     } finally {
       setIsAnalyzing(false);
     }
@@ -373,7 +379,7 @@ ${Object.entries(projectAnalysis.filesByExtension)
         setSpecError(writeResult.error || 'Failed to write spec file');
       }
     } catch (error) {
-      console.error('Failed to generate spec:', error);
+      logger.error('Failed to generate spec:', error);
       setSpecError(error instanceof Error ? error.message : 'Failed to generate spec');
     } finally {
       setIsGeneratingSpec(false);
@@ -634,24 +640,31 @@ ${Object.entries(projectAnalysis.filesByExtension)
       }
 
       for (const detectedFeature of detectedFeatures) {
-        await api.features.create(currentProject.path, {
-          id: crypto.randomUUID(),
+        const newFeature: Feature = {
+          id: generateUUID(),
           category: detectedFeature.category,
           description: detectedFeature.description,
           status: 'backlog',
-        });
+          steps: [],
+        };
+        await api.features.create(currentProject.path, newFeature);
       }
+
+      // Invalidate React Query cache to sync UI
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.features.all(currentProject.path),
+      });
 
       setFeatureListGenerated(true);
     } catch (error) {
-      console.error('Failed to generate feature list:', error);
+      logger.error('Failed to generate feature list:', error);
       setFeatureListError(
         error instanceof Error ? error.message : 'Failed to generate feature list'
       );
     } finally {
       setIsGeneratingFeatureList(false);
     }
-  }, [currentProject, projectAnalysis]);
+  }, [currentProject, projectAnalysis, queryClient]);
 
   // Toggle folder expansion
   const toggleFolder = (path: string) => {
@@ -737,7 +750,7 @@ ${Object.entries(projectAnalysis.filesByExtension)
         <Button onClick={runAnalysis} disabled={isAnalyzing} data-testid="analyze-project-button">
           {isAnalyzing ? (
             <>
-              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              <Spinner size="sm" className="mr-2" />
               Analyzing...
             </>
           ) : (
@@ -766,7 +779,7 @@ ${Object.entries(projectAnalysis.filesByExtension)
           </div>
         ) : isAnalyzing ? (
           <div className="flex flex-col items-center justify-center h-full">
-            <Loader2 className="w-12 h-12 animate-spin text-primary mb-4" />
+            <Spinner size="xl" className="mb-4" />
             <p className="text-muted-foreground">Scanning project files...</p>
           </div>
         ) : projectAnalysis ? (
@@ -845,7 +858,7 @@ ${Object.entries(projectAnalysis.filesByExtension)
                   >
                     {isGeneratingSpec ? (
                       <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        <Spinner size="sm" className="mr-2" />
                         Generating...
                       </>
                     ) : (
@@ -898,7 +911,7 @@ ${Object.entries(projectAnalysis.filesByExtension)
                   >
                     {isGeneratingFeatureList ? (
                       <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        <Spinner size="sm" className="mr-2" />
                         Generating...
                       </>
                     ) : (

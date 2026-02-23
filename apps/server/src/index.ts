@@ -16,7 +16,20 @@ import { createServer } from 'http';
 import dotenv from 'dotenv';
 
 import { createEventEmitter, type EventEmitter } from './lib/events.js';
-import { initAllowedPaths } from '@automaker/platform';
+import { initAllowedPaths, getClaudeAuthIndicators } from '@automaker/platform';
+import { createLogger, setLogLevel, LogLevel } from '@automaker/utils';
+
+const logger = createLogger('Server');
+
+/**
+ * Map server log level string to LogLevel enum
+ */
+const LOG_LEVEL_MAP: Record<string, LogLevel> = {
+  error: LogLevel.ERROR,
+  warn: LogLevel.WARN,
+  info: LogLevel.INFO,
+  debug: LogLevel.DEBUG,
+};
 import { authMiddleware, validateWsConnectionToken, checkRawAuthentication } from './lib/auth.js';
 import { requireJsonContentType } from './middleware/require-json-content-type.js';
 import { createAuthRoutes } from './routes/auth/index.js';
@@ -30,7 +43,6 @@ import { createEnhancePromptRoutes } from './routes/enhance-prompt/index.js';
 import { createWorktreeRoutes } from './routes/worktree/index.js';
 import { createGitRoutes } from './routes/git/index.js';
 import { createSetupRoutes } from './routes/setup/index.js';
-import { createSuggestionsRoutes } from './routes/suggestions/index.js';
 import { createModelsRoutes } from './routes/models/index.js';
 import { createRunningAgentsRoutes } from './routes/running-agents/index.js';
 import { createWorkspaceRoutes } from './routes/workspace/index.js';
@@ -50,6 +62,10 @@ import { SettingsService } from './services/settings-service.js';
 import { createSpecRegenerationRoutes } from './routes/app-spec/index.js';
 import { createClaudeRoutes } from './routes/claude/index.js';
 import { ClaudeUsageService } from './services/claude-usage-service.js';
+import { createCodexRoutes } from './routes/codex/index.js';
+import { CodexUsageService } from './services/codex-usage-service.js';
+import { CodexAppServerService } from './services/codex-app-server-service.js';
+import { CodexModelCacheService } from './services/codex-model-cache-service.js';
 import { createGitHubRoutes } from './routes/github/index.js';
 import { createContextRoutes } from './routes/context/index.js';
 import { createBacklogPlanRoutes } from './routes/backlog-plan/index.js';
@@ -58,33 +74,106 @@ import { createMCPRoutes } from './routes/mcp/index.js';
 import { MCPTestService } from './services/mcp-test-service.js';
 import { createPipelineRoutes } from './routes/pipeline/index.js';
 import { pipelineService } from './services/pipeline-service.js';
+import { createIdeationRoutes } from './routes/ideation/index.js';
+import { IdeationService } from './services/ideation-service.js';
+import { getDevServerService } from './services/dev-server-service.js';
+import { eventHookService } from './services/event-hook-service.js';
+import { createNotificationsRoutes } from './routes/notifications/index.js';
+import { getNotificationService } from './services/notification-service.js';
+import { createEventHistoryRoutes } from './routes/event-history/index.js';
+import { getEventHistoryService } from './services/event-history-service.js';
+import { getTestRunnerService } from './services/test-runner-service.js';
+import { createProjectsRoutes } from './routes/projects/index.js';
 
 // Load environment variables
 dotenv.config();
 
 const PORT = parseInt(process.env.PORT || '3008', 10);
+const HOST = process.env.HOST || '0.0.0.0';
+const HOSTNAME = process.env.HOSTNAME || 'localhost';
 const DATA_DIR = process.env.DATA_DIR || './data';
-const ENABLE_REQUEST_LOGGING = process.env.ENABLE_REQUEST_LOGGING !== 'false'; // Default to true
+logger.info('[SERVER_STARTUP] process.env.DATA_DIR:', process.env.DATA_DIR);
+logger.info('[SERVER_STARTUP] Resolved DATA_DIR:', DATA_DIR);
+logger.info('[SERVER_STARTUP] process.cwd():', process.cwd());
+const ENABLE_REQUEST_LOGGING_DEFAULT = process.env.ENABLE_REQUEST_LOGGING !== 'false'; // Default to true
 
-// Check for required environment variables
-const hasAnthropicKey = !!process.env.ANTHROPIC_API_KEY;
+// Runtime-configurable request logging flag (can be changed via settings)
+let requestLoggingEnabled = ENABLE_REQUEST_LOGGING_DEFAULT;
 
-if (!hasAnthropicKey) {
-  console.warn(`
-╔═══════════════════════════════════════════════════════════════════════╗
-║  ⚠️  WARNING: No Claude authentication configured                      ║
-║                                                                       ║
-║  The Claude Agent SDK requires authentication to function.            ║
-║                                                                       ║
-║  Set your Anthropic API key:                                          ║
-║    export ANTHROPIC_API_KEY="sk-ant-..."                              ║
-║                                                                       ║
-║  Or use the setup wizard in Settings to configure authentication.     ║
-╚═══════════════════════════════════════════════════════════════════════╝
-`);
-} else {
-  console.log('[Server] ✓ ANTHROPIC_API_KEY detected (API key auth)');
+/**
+ * Enable or disable HTTP request logging at runtime
+ */
+export function setRequestLoggingEnabled(enabled: boolean): void {
+  requestLoggingEnabled = enabled;
 }
+
+/**
+ * Get current request logging state
+ */
+export function isRequestLoggingEnabled(): boolean {
+  return requestLoggingEnabled;
+}
+
+// Width for log box content (excluding borders)
+const BOX_CONTENT_WIDTH = 67;
+
+// Check for Claude authentication (async - runs in background)
+// The Claude Agent SDK can use either ANTHROPIC_API_KEY or Claude Code CLI authentication
+(async () => {
+  const hasAnthropicKey = !!process.env.ANTHROPIC_API_KEY;
+
+  if (hasAnthropicKey) {
+    logger.info('✓ ANTHROPIC_API_KEY detected');
+    return;
+  }
+
+  // Check for Claude Code CLI authentication
+  try {
+    const indicators = await getClaudeAuthIndicators();
+    const hasCliAuth =
+      indicators.hasStatsCacheWithActivity ||
+      (indicators.hasSettingsFile && indicators.hasProjectsSessions) ||
+      (indicators.hasCredentialsFile &&
+        (indicators.credentials?.hasOAuthToken || indicators.credentials?.hasApiKey));
+
+    if (hasCliAuth) {
+      logger.info('✓ Claude Code CLI authentication detected');
+      return;
+    }
+  } catch (error) {
+    // Ignore errors checking CLI auth - will fall through to warning
+    logger.warn('Error checking for Claude Code CLI authentication:', error);
+  }
+
+  // No authentication found - show warning
+  const wHeader = '⚠️  WARNING: No Claude authentication configured'.padEnd(BOX_CONTENT_WIDTH);
+  const w1 = 'The Claude Agent SDK requires authentication to function.'.padEnd(BOX_CONTENT_WIDTH);
+  const w2 = 'Options:'.padEnd(BOX_CONTENT_WIDTH);
+  const w3 = '1. Install Claude Code CLI and authenticate with subscription'.padEnd(
+    BOX_CONTENT_WIDTH
+  );
+  const w4 = '2. Set your Anthropic API key:'.padEnd(BOX_CONTENT_WIDTH);
+  const w5 = '   export ANTHROPIC_API_KEY="sk-ant-..."'.padEnd(BOX_CONTENT_WIDTH);
+  const w6 = '3. Use the setup wizard in Settings to configure authentication.'.padEnd(
+    BOX_CONTENT_WIDTH
+  );
+
+  logger.warn(`
+╔═════════════════════════════════════════════════════════════════════╗
+║  ${wHeader}║
+╠═════════════════════════════════════════════════════════════════════╣
+║                                                                     ║
+║  ${w1}║
+║                                                                     ║
+║  ${w2}║
+║  ${w3}║
+║  ${w4}║
+║  ${w5}║
+║  ${w6}║
+║                                                                     ║
+╚═════════════════════════════════════════════════════════════════════╝
+`);
+})();
 
 // Initialize security
 initAllowedPaths();
@@ -93,22 +182,21 @@ initAllowedPaths();
 const app = express();
 
 // Middleware
-// Custom colored logger showing only endpoint and status code (configurable via ENABLE_REQUEST_LOGGING env var)
-if (ENABLE_REQUEST_LOGGING) {
-  morgan.token('status-colored', (_req, res) => {
-    const status = res.statusCode;
-    if (status >= 500) return `\x1b[31m${status}\x1b[0m`; // Red for server errors
-    if (status >= 400) return `\x1b[33m${status}\x1b[0m`; // Yellow for client errors
-    if (status >= 300) return `\x1b[36m${status}\x1b[0m`; // Cyan for redirects
-    return `\x1b[32m${status}\x1b[0m`; // Green for success
-  });
+// Custom colored logger showing only endpoint and status code (dynamically configurable)
+morgan.token('status-colored', (_req, res) => {
+  const status = res.statusCode;
+  if (status >= 500) return `\x1b[31m${status}\x1b[0m`; // Red for server errors
+  if (status >= 400) return `\x1b[33m${status}\x1b[0m`; // Yellow for client errors
+  if (status >= 300) return `\x1b[36m${status}\x1b[0m`; // Cyan for redirects
+  return `\x1b[32m${status}\x1b[0m`; // Green for success
+});
 
-  app.use(
-    morgan(':method :url :status-colored', {
-      skip: (req) => req.url === '/api/health', // Skip health check logs
-    })
-  );
-}
+app.use(
+  morgan(':method :url :status-colored', {
+    // Skip when request logging is disabled or for health check endpoints
+    skip: (req) => !requestLoggingEnabled || req.url === '/api/health',
+  })
+);
 // CORS configuration
 // When using credentials (cookies), origin cannot be '*'
 // We dynamically allow the requesting origin for local development
@@ -132,14 +220,25 @@ app.use(
         return;
       }
 
-      // For local development, allow localhost origins
-      if (
-        origin.startsWith('http://localhost:') ||
-        origin.startsWith('http://127.0.0.1:') ||
-        origin.startsWith('http://[::1]:')
-      ) {
-        callback(null, origin);
-        return;
+      // For local development, allow all localhost/loopback origins (any port)
+      try {
+        const url = new URL(origin);
+        const hostname = url.hostname;
+
+        if (
+          hostname === 'localhost' ||
+          hostname === '127.0.0.1' ||
+          hostname === '::1' ||
+          hostname === '0.0.0.0' ||
+          hostname.startsWith('192.168.') ||
+          hostname.startsWith('10.') ||
+          hostname.startsWith('172.')
+        ) {
+          callback(null, origin);
+          return;
+        }
+      } catch (err) {
+        // Ignore URL parsing errors
       }
 
       // Reject other origins by default for security
@@ -161,12 +260,71 @@ const agentService = new AgentService(DATA_DIR, events, settingsService);
 const featureLoader = new FeatureLoader();
 const autoModeService = new AutoModeService(events, settingsService);
 const claudeUsageService = new ClaudeUsageService();
+const codexAppServerService = new CodexAppServerService();
+const codexModelCacheService = new CodexModelCacheService(DATA_DIR, codexAppServerService);
+const codexUsageService = new CodexUsageService(codexAppServerService);
 const mcpTestService = new MCPTestService(settingsService);
+const ideationService = new IdeationService(events, settingsService, featureLoader);
+
+// Initialize DevServerService with event emitter for real-time log streaming
+const devServerService = getDevServerService();
+devServerService.setEventEmitter(events);
+
+// Initialize Notification Service with event emitter for real-time updates
+const notificationService = getNotificationService();
+notificationService.setEventEmitter(events);
+
+// Initialize Event History Service
+const eventHistoryService = getEventHistoryService();
+
+// Initialize Test Runner Service with event emitter for real-time test output streaming
+const testRunnerService = getTestRunnerService();
+testRunnerService.setEventEmitter(events);
+
+// Initialize Event Hook Service for custom event triggers (with history storage)
+eventHookService.initialize(events, settingsService, eventHistoryService, featureLoader);
 
 // Initialize services
 (async () => {
+  // Migrate settings from legacy Electron userData location if needed
+  // This handles users upgrading from versions that stored settings in ~/.config/Automaker (Linux),
+  // ~/Library/Application Support/Automaker (macOS), or %APPDATA%\Automaker (Windows)
+  // to the new shared ./data directory
+  try {
+    const migrationResult = await settingsService.migrateFromLegacyElectronPath();
+    if (migrationResult.migrated) {
+      logger.info(`Settings migrated from legacy location: ${migrationResult.legacyPath}`);
+      logger.info(`Migrated files: ${migrationResult.migratedFiles.join(', ')}`);
+    }
+    if (migrationResult.errors.length > 0) {
+      logger.warn('Migration errors:', migrationResult.errors);
+    }
+  } catch (err) {
+    logger.warn('Failed to check for legacy settings migration:', err);
+  }
+
+  // Apply logging settings from saved settings
+  try {
+    const settings = await settingsService.getGlobalSettings();
+    if (settings.serverLogLevel && LOG_LEVEL_MAP[settings.serverLogLevel] !== undefined) {
+      setLogLevel(LOG_LEVEL_MAP[settings.serverLogLevel]);
+      logger.info(`Server log level set to: ${settings.serverLogLevel}`);
+    }
+    // Apply request logging setting (default true if not set)
+    const enableRequestLog = settings.enableRequestLogging ?? true;
+    setRequestLoggingEnabled(enableRequestLog);
+    logger.info(`HTTP request logging: ${enableRequestLog ? 'enabled' : 'disabled'}`);
+  } catch (err) {
+    logger.warn('Failed to load logging settings, using defaults');
+  }
+
   await agentService.initialize();
-  console.log('[Server] Agent service initialized');
+  logger.info('Agent service initialized');
+
+  // Bootstrap Codex model cache in background (don't block server startup)
+  void codexModelCacheService.getModels().catch((err) => {
+    logger.error('Failed to bootstrap Codex model cache:', err);
+  });
 })();
 
 // Run stale validation cleanup every hour to prevent memory leaks from crashed validations
@@ -174,7 +332,7 @@ const VALIDATION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 setInterval(() => {
   const cleaned = cleanupStaleValidations();
   if (cleaned > 0) {
-    console.log(`[Server] Cleaned up ${cleaned} stale validation entries`);
+    logger.info(`Cleaned up ${cleaned} stale validation entries`);
   }
 }, VALIDATION_CLEANUP_INTERVAL_MS);
 
@@ -182,9 +340,10 @@ setInterval(() => {
 // This helps prevent CSRF and content-type confusion attacks
 app.use('/api', requireJsonContentType);
 
-// Mount API routes - health and auth are unauthenticated
+// Mount API routes - health, auth, and setup are unauthenticated
 app.use('/api/health', createHealthRoutes());
 app.use('/api/auth', createAuthRoutes());
+app.use('/api/setup', createSetupRoutes());
 
 // Apply authentication to all other routes
 app.use('/api', authMiddleware);
@@ -195,13 +354,14 @@ app.get('/api/health/detailed', createDetailedHandler());
 app.use('/api/fs', createFsRoutes(events));
 app.use('/api/agent', createAgentRoutes(agentService, events));
 app.use('/api/sessions', createSessionsRoutes(agentService));
-app.use('/api/features', createFeaturesRoutes(featureLoader));
+app.use(
+  '/api/features',
+  createFeaturesRoutes(featureLoader, settingsService, events, autoModeService)
+);
 app.use('/api/auto-mode', createAutoModeRoutes(autoModeService));
 app.use('/api/enhance-prompt', createEnhancePromptRoutes(settingsService));
-app.use('/api/worktree', createWorktreeRoutes());
+app.use('/api/worktree', createWorktreeRoutes(events, settingsService));
 app.use('/api/git', createGitRoutes());
-app.use('/api/setup', createSetupRoutes());
-app.use('/api/suggestions', createSuggestionsRoutes(events, settingsService));
 app.use('/api/models', createModelsRoutes());
 app.use('/api/spec-regeneration', createSpecRegenerationRoutes(events, settingsService));
 app.use('/api/running-agents', createRunningAgentsRoutes(autoModeService));
@@ -210,11 +370,19 @@ app.use('/api/templates', createTemplatesRoutes());
 app.use('/api/terminal', createTerminalRoutes());
 app.use('/api/settings', createSettingsRoutes(settingsService));
 app.use('/api/claude', createClaudeRoutes(claudeUsageService));
+app.use('/api/codex', createCodexRoutes(codexUsageService, codexModelCacheService));
 app.use('/api/github', createGitHubRoutes(events, settingsService));
 app.use('/api/context', createContextRoutes(settingsService));
 app.use('/api/backlog-plan', createBacklogPlanRoutes(events, settingsService));
 app.use('/api/mcp', createMCPRoutes(mcpTestService));
 app.use('/api/pipeline', createPipelineRoutes(pipelineService));
+app.use('/api/ideation', createIdeationRoutes(events, ideationService, featureLoader));
+app.use('/api/notifications', createNotificationsRoutes(notificationService));
+app.use('/api/event-history', createEventHistoryRoutes(eventHistoryService, settingsService));
+app.use(
+  '/api/projects',
+  createProjectsRoutes(featureLoader, autoModeService, settingsService, notificationService)
+);
 
 // Create HTTP server
 const server = createServer(app);
@@ -222,7 +390,7 @@ const server = createServer(app);
 // WebSocket servers using noServer mode for proper multi-path support
 const wss = new WebSocketServer({ noServer: true });
 const terminalWss = new WebSocketServer({ noServer: true });
-const terminalService = getTerminalService();
+const terminalService = getTerminalService(settingsService);
 
 /**
  * Authenticate WebSocket upgrade requests
@@ -267,7 +435,7 @@ server.on('upgrade', (request, socket, head) => {
 
   // Authenticate all WebSocket connections
   if (!authenticateWebSocket(request)) {
-    console.log('[WebSocket] Authentication failed, rejecting connection');
+    logger.info('Authentication failed, rejecting connection');
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
     return;
@@ -288,11 +456,11 @@ server.on('upgrade', (request, socket, head) => {
 
 // Events WebSocket connection handler
 wss.on('connection', (ws: WebSocket) => {
-  console.log('[WebSocket] Client connected, ready state:', ws.readyState);
+  logger.info('Client connected, ready state:', ws.readyState);
 
   // Subscribe to all events and forward to this client
   const unsubscribe = events.subscribe((type, payload) => {
-    console.log('[WebSocket] Event received:', {
+    logger.info('Event received:', {
       type,
       hasPayload: !!payload,
       payloadKeys: payload ? Object.keys(payload) : [],
@@ -302,27 +470,24 @@ wss.on('connection', (ws: WebSocket) => {
 
     if (ws.readyState === WebSocket.OPEN) {
       const message = JSON.stringify({ type, payload });
-      console.log('[WebSocket] Sending event to client:', {
+      logger.info('Sending event to client:', {
         type,
         messageLength: message.length,
         sessionId: (payload as any)?.sessionId,
       });
       ws.send(message);
     } else {
-      console.log(
-        '[WebSocket] WARNING: Cannot send event, WebSocket not open. ReadyState:',
-        ws.readyState
-      );
+      logger.info('WARNING: Cannot send event, WebSocket not open. ReadyState:', ws.readyState);
     }
   });
 
   ws.on('close', () => {
-    console.log('[WebSocket] Client disconnected');
+    logger.info('Client disconnected');
     unsubscribe();
   });
 
   ws.on('error', (error) => {
-    console.error('[WebSocket] ERROR:', error);
+    logger.error('ERROR:', error);
     unsubscribe();
   });
 });
@@ -349,24 +514,24 @@ terminalWss.on('connection', (ws: WebSocket, req: import('http').IncomingMessage
   const sessionId = url.searchParams.get('sessionId');
   const token = url.searchParams.get('token');
 
-  console.log(`[Terminal WS] Connection attempt for session: ${sessionId}`);
+  logger.info(`Connection attempt for session: ${sessionId}`);
 
   // Check if terminal is enabled
   if (!isTerminalEnabled()) {
-    console.log('[Terminal WS] Terminal is disabled');
+    logger.info('Terminal is disabled');
     ws.close(4003, 'Terminal access is disabled');
     return;
   }
 
   // Validate token if password is required
   if (isTerminalPasswordRequired() && !validateTerminalToken(token || undefined)) {
-    console.log('[Terminal WS] Invalid or missing token');
+    logger.info('Invalid or missing token');
     ws.close(4001, 'Authentication required');
     return;
   }
 
   if (!sessionId) {
-    console.log('[Terminal WS] No session ID provided');
+    logger.info('No session ID provided');
     ws.close(4002, 'Session ID required');
     return;
   }
@@ -374,12 +539,12 @@ terminalWss.on('connection', (ws: WebSocket, req: import('http').IncomingMessage
   // Check if session exists
   const session = terminalService.getSession(sessionId);
   if (!session) {
-    console.log(`[Terminal WS] Session ${sessionId} not found`);
+    logger.info(`Session ${sessionId} not found`);
     ws.close(4004, 'Session not found');
     return;
   }
 
-  console.log(`[Terminal WS] Client connected to session ${sessionId}`);
+  logger.info(`Client connected to session ${sessionId}`);
 
   // Track this connection
   if (!terminalConnections.has(sessionId)) {
@@ -495,15 +660,15 @@ terminalWss.on('connection', (ws: WebSocket, req: import('http').IncomingMessage
           break;
 
         default:
-          console.warn(`[Terminal WS] Unknown message type: ${msg.type}`);
+          logger.warn(`Unknown message type: ${msg.type}`);
       }
     } catch (error) {
-      console.error('[Terminal WS] Error processing message:', error);
+      logger.error('Error processing message:', error);
     }
   });
 
   ws.on('close', () => {
-    console.log(`[Terminal WS] Client disconnected from session ${sessionId}`);
+    logger.info(`Client disconnected from session ${sessionId}`);
     unsubscribeData();
     unsubscribeExit();
 
@@ -522,79 +687,149 @@ terminalWss.on('connection', (ws: WebSocket, req: import('http').IncomingMessage
   });
 
   ws.on('error', (error) => {
-    console.error(`[Terminal WS] Error on session ${sessionId}:`, error);
+    logger.error(`Error on session ${sessionId}:`, error);
     unsubscribeData();
     unsubscribeExit();
   });
 });
 
 // Start server with error handling for port conflicts
-const startServer = (port: number) => {
-  server.listen(port, () => {
+const startServer = (port: number, host: string) => {
+  server.listen(port, host, () => {
     const terminalStatus = isTerminalEnabled()
       ? isTerminalPasswordRequired()
         ? 'enabled (password protected)'
         : 'enabled'
       : 'disabled';
-    const portStr = port.toString().padEnd(4);
-    console.log(`
-╔═══════════════════════════════════════════════════════╗
-║           Automaker Backend Server                    ║
-╠═══════════════════════════════════════════════════════╣
-║  HTTP API:    http://localhost:${portStr}                 ║
-║  WebSocket:   ws://localhost:${portStr}/api/events        ║
-║  Terminal:    ws://localhost:${portStr}/api/terminal/ws   ║
-║  Health:      http://localhost:${portStr}/api/health      ║
-║  Terminal:    ${terminalStatus.padEnd(37)}║
-╚═══════════════════════════════════════════════════════╝
+
+    // Build URLs for display
+    const listenAddr = `${host}:${port}`;
+    const httpUrl = `http://${HOSTNAME}:${port}`;
+    const wsEventsUrl = `ws://${HOSTNAME}:${port}/api/events`;
+    const wsTerminalUrl = `ws://${HOSTNAME}:${port}/api/terminal/ws`;
+    const healthUrl = `http://${HOSTNAME}:${port}/api/health`;
+
+    const sHeader = '🚀 Automaker Backend Server'.padEnd(BOX_CONTENT_WIDTH);
+    const s1 = `Listening:    ${listenAddr}`.padEnd(BOX_CONTENT_WIDTH);
+    const s2 = `HTTP API:     ${httpUrl}`.padEnd(BOX_CONTENT_WIDTH);
+    const s3 = `WebSocket:    ${wsEventsUrl}`.padEnd(BOX_CONTENT_WIDTH);
+    const s4 = `Terminal WS:  ${wsTerminalUrl}`.padEnd(BOX_CONTENT_WIDTH);
+    const s5 = `Health:       ${healthUrl}`.padEnd(BOX_CONTENT_WIDTH);
+    const s6 = `Terminal:     ${terminalStatus}`.padEnd(BOX_CONTENT_WIDTH);
+
+    logger.info(`
+╔═════════════════════════════════════════════════════════════════════╗
+║  ${sHeader}║
+╠═════════════════════════════════════════════════════════════════════╣
+║                                                                     ║
+║  ${s1}║
+║  ${s2}║
+║  ${s3}║
+║  ${s4}║
+║  ${s5}║
+║  ${s6}║
+║                                                                     ║
+╚═════════════════════════════════════════════════════════════════════╝
 `);
   });
 
   server.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'EADDRINUSE') {
-      console.error(`
-╔═══════════════════════════════════════════════════════╗
-║  ❌ ERROR: Port ${port} is already in use              ║
-╠═══════════════════════════════════════════════════════╣
-║  Another process is using this port.                  ║
-║                                                       ║
-║  To fix this, try one of:                             ║
-║                                                       ║
-║  1. Kill the process using the port:                  ║
-║     lsof -ti:${port} | xargs kill -9                   ║
-║                                                       ║
-║  2. Use a different port:                             ║
-║     PORT=${port + 1} npm run dev:server                ║
-║                                                       ║
-║  3. Use the init.sh script which handles this:        ║
-║     ./init.sh                                         ║
-╚═══════════════════════════════════════════════════════╝
+      const portStr = port.toString();
+      const nextPortStr = (port + 1).toString();
+      const killCmd = `lsof -ti:${portStr} | xargs kill -9`;
+      const altCmd = `PORT=${nextPortStr} npm run dev:server`;
+
+      const eHeader = `❌ ERROR: Port ${portStr} is already in use`.padEnd(BOX_CONTENT_WIDTH);
+      const e1 = 'Another process is using this port.'.padEnd(BOX_CONTENT_WIDTH);
+      const e2 = 'To fix this, try one of:'.padEnd(BOX_CONTENT_WIDTH);
+      const e3 = '1. Kill the process using the port:'.padEnd(BOX_CONTENT_WIDTH);
+      const e4 = `   ${killCmd}`.padEnd(BOX_CONTENT_WIDTH);
+      const e5 = '2. Use a different port:'.padEnd(BOX_CONTENT_WIDTH);
+      const e6 = `   ${altCmd}`.padEnd(BOX_CONTENT_WIDTH);
+      const e7 = '3. Use the init.sh script which handles this:'.padEnd(BOX_CONTENT_WIDTH);
+      const e8 = '   ./init.sh'.padEnd(BOX_CONTENT_WIDTH);
+
+      logger.error(`
+╔═════════════════════════════════════════════════════════════════════╗
+║  ${eHeader}║
+╠═════════════════════════════════════════════════════════════════════╣
+║                                                                     ║
+║  ${e1}║
+║                                                                     ║
+║  ${e2}║
+║                                                                     ║
+║  ${e3}║
+║  ${e4}║
+║                                                                     ║
+║  ${e5}║
+║  ${e6}║
+║                                                                     ║
+║  ${e7}║
+║  ${e8}║
+║                                                                     ║
+╚═════════════════════════════════════════════════════════════════════╝
 `);
       process.exit(1);
     } else {
-      console.error('[Server] Error starting server:', error);
+      logger.error('Error starting server:', error);
       process.exit(1);
     }
   });
 };
 
-startServer(PORT);
+startServer(PORT, HOST);
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down...');
+// Global error handlers to prevent crashes from uncaught errors
+process.on('unhandledRejection', (reason: unknown, _promise: Promise<unknown>) => {
+  logger.error('Unhandled Promise Rejection:', {
+    reason: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
+  // Don't exit - log the error and continue running
+  // This prevents the server from crashing due to unhandled rejections
+});
+
+process.on('uncaughtException', (error: Error) => {
+  logger.error('Uncaught Exception:', {
+    message: error.message,
+    stack: error.stack,
+  });
+  // Exit on uncaught exceptions to prevent undefined behavior
+  // The process is in an unknown state after an uncaught exception
+  process.exit(1);
+});
+
+// Graceful shutdown timeout (30 seconds)
+const SHUTDOWN_TIMEOUT_MS = 30000;
+
+// Graceful shutdown helper
+const gracefulShutdown = async (signal: string) => {
+  logger.info(`${signal} received, shutting down...`);
+
+  // Set up a force-exit timeout to prevent hanging
+  const forceExitTimeout = setTimeout(() => {
+    logger.error(`Shutdown timed out after ${SHUTDOWN_TIMEOUT_MS}ms, forcing exit`);
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+
+  // Mark all running features as interrupted before shutdown
+  // This ensures they can be resumed when the server restarts
+  // Note: markAllRunningFeaturesInterrupted handles errors internally and never rejects
+  await autoModeService.markAllRunningFeaturesInterrupted(`${signal} signal received`);
+
   terminalService.cleanup();
   server.close(() => {
-    console.log('Server closed');
+    clearTimeout(forceExitTimeout);
+    logger.info('Server closed');
     process.exit(0);
   });
+};
+
+process.on('SIGTERM', () => {
+  gracefulShutdown('SIGTERM');
 });
 
 process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down...');
-  terminalService.cleanup();
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
+  gracefulShutdown('SIGINT');
 });

@@ -40,13 +40,35 @@ export {
 } from './prompt-builder.js';
 
 // Logger
-export { createLogger, getLogLevel, setLogLevel, LogLevel } from './logger.js';
+export {
+  createLogger,
+  getLogLevel,
+  setLogLevel,
+  setColorsEnabled,
+  setTimestampsEnabled,
+  LogLevel,
+  type Logger,
+} from './logger.js';
 
 // File system utilities
 export { mkdirSafe, existsSafe } from './fs-utils.js';
 
+// Atomic file operations
+export {
+  atomicWriteJson,
+  readJsonFile,
+  updateJsonAtomically,
+  readJsonWithRecovery,
+  rotateBackups,
+  logRecoveryWarning,
+  DEFAULT_BACKUP_COUNT,
+  type AtomicWriteOptions,
+  type ReadJsonRecoveryResult,
+  type ReadJsonRecoveryOptions,
+} from './atomic-writer.js';
+
 // Path utilities
-export { normalizePath, pathsEqual } from './path-utils.js';
+export { normalizePath, pathsEqual, sanitizeFilename } from './path-utils.js';
 
 // Context file loading
 export {
@@ -55,5 +77,40 @@ export {
   type ContextMetadata,
   type ContextFileInfo,
   type ContextFilesResult,
+  type ContextFsModule,
   type LoadContextFilesOptions,
+  type MemoryFileInfo,
+  type TaskContext,
 } from './context-loader.js';
+
+// Memory loading
+export {
+  loadRelevantMemory,
+  initializeMemoryFolder,
+  appendLearning,
+  recordMemoryUsage,
+  getMemoryDir,
+  parseFrontmatter,
+  serializeFrontmatter,
+  extractTerms,
+  calculateUsageScore,
+  countMatches,
+  incrementUsageStat,
+  formatLearning,
+  type MemoryFsModule,
+  type MemoryMetadata,
+  type MemoryFile,
+  type MemoryLoadResult,
+  type UsageStats,
+  type LearningEntry,
+  type SimpleMemoryFile,
+} from './memory-loader.js';
+
+// Debounce and throttle utilities
+export {
+  debounce,
+  throttle,
+  type DebounceOptions,
+  type ThrottleOptions,
+  type DebouncedFunction,
+} from './debounce.js';

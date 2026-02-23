@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -12,9 +12,12 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
-import { GitPullRequest, Loader2, ExternalLink } from 'lucide-react';
+import { BranchAutocomplete } from '@/components/ui/branch-autocomplete';
+import { GitPullRequest, ExternalLink } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import { getElectronAPI } from '@/lib/electron';
 import { toast } from 'sonner';
+import { useWorktreeBranches } from '@/hooks/queries';
 
 interface WorktreeInfo {
   path: string;
@@ -30,6 +33,8 @@ interface CreatePRDialogProps {
   worktree: WorktreeInfo | null;
   projectPath: string | null;
   onCreated: (prUrl?: string) => void;
+  /** Default base branch for the PR (defaults to 'main' if not provided) */
+  defaultBaseBranch?: string;
 }
 
 export function CreatePRDialog({
@@ -38,10 +43,11 @@ export function CreatePRDialog({
   worktree,
   projectPath,
   onCreated,
+  defaultBaseBranch = 'main',
 }: CreatePRDialogProps) {
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
-  const [baseBranch, setBaseBranch] = useState('main');
+  const [baseBranch, setBaseBranch] = useState(defaultBaseBranch);
   const [commitMessage, setCommitMessage] = useState('');
   const [isDraft, setIsDraft] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -52,37 +58,37 @@ export function CreatePRDialog({
   // Track whether an operation completed that warrants a refresh
   const operationCompletedRef = useRef(false);
 
+  // Use React Query for branch fetching - only enabled when dialog is open
+  const { data: branchesData, isLoading: isLoadingBranches } = useWorktreeBranches(
+    open ? worktree?.path : undefined,
+    true // Include remote branches for PR base branch selection
+  );
+
+  // Filter out current worktree branch from the list
+  const branches = useMemo(() => {
+    if (!branchesData?.branches) return [];
+    return branchesData.branches.map((b) => b.name).filter((name) => name !== worktree?.branch);
+  }, [branchesData?.branches, worktree?.branch]);
+
+  // Common state reset function to avoid duplication
+  const resetState = useCallback(() => {
+    setTitle('');
+    setBody('');
+    setCommitMessage('');
+    setBaseBranch(defaultBaseBranch);
+    setIsDraft(false);
+    setError(null);
+    setPrUrl(null);
+    setBrowserUrl(null);
+    setShowBrowserFallback(false);
+    operationCompletedRef.current = false;
+  }, [defaultBaseBranch]);
+
   // Reset state when dialog opens or worktree changes
   useEffect(() => {
-    if (open) {
-      // Reset form fields
-      setTitle('');
-      setBody('');
-      setCommitMessage('');
-      setBaseBranch('main');
-      setIsDraft(false);
-      setError(null);
-      // Also reset result states when opening for a new worktree
-      // This prevents showing stale PR URLs from previous worktrees
-      setPrUrl(null);
-      setBrowserUrl(null);
-      setShowBrowserFallback(false);
-      // Reset operation tracking
-      operationCompletedRef.current = false;
-    } else {
-      // Reset everything when dialog closes
-      setTitle('');
-      setBody('');
-      setCommitMessage('');
-      setBaseBranch('main');
-      setIsDraft(false);
-      setError(null);
-      setPrUrl(null);
-      setBrowserUrl(null);
-      setShowBrowserFallback(false);
-      operationCompletedRef.current = false;
-    }
-  }, [open, worktree?.path]);
+    // Reset all state on both open and close
+    resetState();
+  }, [open, worktree?.path, resetState]);
 
   const handleCreate = async () => {
     if (!worktree) return;
@@ -117,7 +123,7 @@ export function CreatePRDialog({
               description: `PR already exists for ${result.result.branch}`,
               action: {
                 label: 'View PR',
-                onClick: () => window.open(result.result!.prUrl!, '_blank'),
+                onClick: () => window.open(result.result!.prUrl!, '_blank', 'noopener,noreferrer'),
               },
             });
           } else {
@@ -125,7 +131,7 @@ export function CreatePRDialog({
               description: `PR created from ${result.result.branch}`,
               action: {
                 label: 'View PR',
-                onClick: () => window.open(result.result!.prUrl!, '_blank'),
+                onClick: () => window.open(result.result!.prUrl!, '_blank', 'noopener,noreferrer'),
               },
             });
           }
@@ -235,9 +241,9 @@ export function CreatePRDialog({
             <GitPullRequest className="w-5 h-5" />
             Create Pull Request
           </DialogTitle>
-          <DialogDescription>
+          <DialogDescription className="break-words">
             Push changes and create a pull request from{' '}
-            <code className="font-mono bg-muted px-1 rounded">{worktree.branch}</code>
+            <code className="font-mono bg-muted px-1 rounded break-all">{worktree.branch}</code>
           </DialogDescription>
         </DialogHeader>
 
@@ -251,7 +257,10 @@ export function CreatePRDialog({
               <p className="text-sm text-muted-foreground mt-1">Your PR is ready for review</p>
             </div>
             <div className="flex gap-2 justify-center">
-              <Button onClick={() => window.open(prUrl, '_blank')} className="gap-2">
+              <Button
+                onClick={() => window.open(prUrl, '_blank', 'noopener,noreferrer')}
+                className="gap-2"
+              >
                 <ExternalLink className="w-4 h-4" />
                 View Pull Request
               </Button>
@@ -277,7 +286,7 @@ export function CreatePRDialog({
               <Button
                 onClick={() => {
                   if (browserUrl) {
-                    window.open(browserUrl, '_blank');
+                    window.open(browserUrl, '_blank', 'noopener,noreferrer');
                   }
                 }}
                 className="gap-2 w-full"
@@ -340,15 +349,16 @@ export function CreatePRDialog({
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="flex flex-col gap-4">
                 <div className="grid gap-2">
                   <Label htmlFor="base-branch">Base Branch</Label>
-                  <Input
-                    id="base-branch"
-                    placeholder="main"
+                  <BranchAutocomplete
                     value={baseBranch}
-                    onChange={(e) => setBaseBranch(e.target.value)}
-                    className="font-mono text-sm"
+                    onChange={setBaseBranch}
+                    branches={branches}
+                    placeholder="Select base branch..."
+                    disabled={isLoadingBranches}
+                    data-testid="base-branch-autocomplete"
                   />
                 </div>
                 <div className="flex items-end">
@@ -375,7 +385,7 @@ export function CreatePRDialog({
               <Button onClick={handleCreate} disabled={isLoading}>
                 {isLoading ? (
                   <>
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    <Spinner size="sm" className="mr-2" />
                     Creating...
                   </>
                 ) : (

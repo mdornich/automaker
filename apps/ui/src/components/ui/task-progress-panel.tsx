@@ -1,10 +1,15 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { createLogger } from '@automaker/utils/logger';
 import { cn } from '@/lib/utils';
-import { Check, Loader2, Circle, ChevronDown, ChevronRight, FileCode } from 'lucide-react';
+
+const logger = createLogger('TaskProgressPanel');
+import { Check, Circle, ChevronDown, ChevronRight, FileCode } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import { getElectronAPI } from '@/lib/electron';
 import type { AutoModeEvent } from '@/types/electron';
+import type { Feature, ParsedTask } from '@automaker/types';
 import { Badge } from '@/components/ui/badge';
 
 interface TaskInfo {
@@ -19,13 +24,20 @@ interface TaskProgressPanelProps {
   featureId: string;
   projectPath?: string;
   className?: string;
+  /** Whether the panel starts expanded (default: true) */
+  defaultExpanded?: boolean;
 }
 
-export function TaskProgressPanel({ featureId, projectPath, className }: TaskProgressPanelProps) {
+export function TaskProgressPanel({
+  featureId,
+  projectPath,
+  className,
+  defaultExpanded = true,
+}: TaskProgressPanelProps) {
   const [tasks, setTasks] = useState<TaskInfo[]>([]);
-  const [isExpanded, setIsExpanded] = useState(true);
+  const [isExpanded, setIsExpanded] = useState(defaultExpanded);
   const [isLoading, setIsLoading] = useState(true);
-  const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
+  const [, setCurrentTaskId] = useState<string | null>(null);
 
   // Load initial tasks from feature's planSpec
   const loadInitialTasks = useCallback(async () => {
@@ -42,30 +54,35 @@ export function TaskProgressPanel({ featureId, projectPath, className }: TaskPro
       }
 
       const result = await api.features.get(projectPath, featureId);
-      if (result.success && result.feature?.planSpec?.tasks) {
-        const planTasks = result.feature.planSpec.tasks;
-        const currentId = result.feature.planSpec.currentTaskId;
-        const completedCount = result.feature.planSpec.tasksCompleted || 0;
+      const feature = (result as { success: boolean; feature?: Feature }).feature;
+      if (result.success && feature?.planSpec?.tasks) {
+        const planSpec = feature.planSpec;
+        const planTasks = planSpec.tasks; // Already guarded by the if condition above
+        const currentId = planSpec.currentTaskId;
+        const completedCount = planSpec.tasksCompleted || 0;
 
         // Convert planSpec tasks to TaskInfo with proper status
-        const initialTasks: TaskInfo[] = planTasks.map((t: any, index: number) => ({
-          id: t.id,
-          description: t.description,
-          filePath: t.filePath,
-          phase: t.phase,
-          status:
-            index < completedCount
-              ? ('completed' as const)
-              : t.id === currentId
-                ? ('in_progress' as const)
-                : ('pending' as const),
-        }));
+        // planTasks is guaranteed to be defined due to the if condition check
+        const initialTasks: TaskInfo[] = (planTasks as ParsedTask[]).map(
+          (t: ParsedTask, index: number) => ({
+            id: t.id,
+            description: t.description,
+            filePath: t.filePath,
+            phase: t.phase,
+            status:
+              index < completedCount
+                ? ('completed' as const)
+                : t.id === currentId
+                  ? ('in_progress' as const)
+                  : ('pending' as const),
+          })
+        );
 
         setTasks(initialTasks);
         setCurrentTaskId(currentId || null);
       }
     } catch (error) {
-      console.error('Failed to load initial tasks:', error);
+      logger.error('Failed to load initial tasks:', error);
     } finally {
       setIsLoading(false);
     }
@@ -151,13 +168,13 @@ export function TaskProgressPanel({ featureId, projectPath, className }: TaskPro
   return (
     <div
       className={cn(
-        'group rounded-xl border bg-card/50 shadow-sm overflow-hidden transition-all duration-200',
+        'group rounded-lg border bg-card/50 shadow-sm overflow-hidden transition-all duration-200',
         className
       )}
     >
       <button
         onClick={() => setIsExpanded(!isExpanded)}
-        className="w-full flex items-center justify-between p-4 bg-muted/10 hover:bg-muted/20 transition-colors"
+        className="w-full flex items-center justify-between px-3 py-2.5 bg-muted/10 hover:bg-muted/20 transition-colors"
       >
         <div className="flex items-center gap-3">
           <div
@@ -218,12 +235,12 @@ export function TaskProgressPanel({ featureId, projectPath, className }: TaskPro
         )}
       >
         <div className="overflow-hidden">
-          <div className="p-5 pt-2 relative max-h-[300px] overflow-y-auto scrollbar-visible">
+          <div className="p-4 pt-2 relative max-h-[200px] overflow-y-auto scrollbar-visible">
             {/* Vertical Connector Line */}
-            <div className="absolute left-[2.35rem] top-4 bottom-8 w-px bg-gradient-to-b from-border/80 via-border/40 to-transparent" />
+            <div className="absolute left-[2.35rem] top-4 bottom-8 w-px bg-linear-to-b from-border/80 via-border/40 to-transparent" />
 
             <div className="space-y-5">
-              {tasks.map((task, index) => {
+              {tasks.map((task, _index) => {
                 const isActive = task.status === 'in_progress';
                 const isCompleted = task.status === 'completed';
                 const isPending = task.status === 'pending';
@@ -248,7 +265,7 @@ export function TaskProgressPanel({ featureId, projectPath, className }: TaskPro
                       )}
                     >
                       {isCompleted && <Check className="h-3.5 w-3.5" />}
-                      {isActive && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                      {isActive && <Spinner size="xs" variant="foreground" />}
                       {isPending && <Circle className="h-2 w-2 fill-current opacity-50" />}
                     </div>
 

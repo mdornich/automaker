@@ -8,7 +8,8 @@ import {
   DropdownMenuTrigger,
   DropdownMenuLabel,
 } from '@/components/ui/dropdown-menu';
-import { GitBranch, RefreshCw, GitBranchPlus, Check, Search } from 'lucide-react';
+import { GitBranch, GitBranchPlus, Check, Search } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import { cn } from '@/lib/utils';
 import type { WorktreeInfo, BranchInfo } from '../types';
 
@@ -20,6 +21,8 @@ interface BranchSwitchDropdownProps {
   branchFilter: string;
   isLoadingBranches: boolean;
   isSwitching: boolean;
+  /** When true, renders as a standalone button (not attached to another element) */
+  standalone?: boolean;
   onOpenChange: (open: boolean) => void;
   onFilterChange: (value: string) => void;
   onSwitchBranch: (worktree: WorktreeInfo, branchName: string) => void;
@@ -33,6 +36,7 @@ export function BranchSwitchDropdown({
   branchFilter,
   isLoadingBranches,
   isSwitching,
+  standalone = false,
   onOpenChange,
   onFilterChange,
   onSwitchBranch,
@@ -42,16 +46,18 @@ export function BranchSwitchDropdown({
     <DropdownMenu onOpenChange={onOpenChange}>
       <DropdownMenuTrigger asChild>
         <Button
-          variant={isSelected ? 'default' : 'outline'}
+          variant={standalone ? 'outline' : isSelected ? 'default' : 'outline'}
           size="sm"
           className={cn(
-            'h-7 w-7 p-0 rounded-none border-r-0',
-            isSelected && 'bg-primary text-primary-foreground',
-            !isSelected && 'bg-secondary/50 hover:bg-secondary'
+            'h-7 w-7 p-0',
+            !standalone && 'rounded-none border-r-0',
+            standalone && 'h-8 w-8 shrink-0',
+            !standalone && isSelected && 'bg-primary text-primary-foreground',
+            !standalone && !isSelected && 'bg-secondary/50 hover:bg-secondary'
           )}
           title="Switch branch"
         >
-          <GitBranch className="w-3 h-3" />
+          <GitBranch className={standalone ? 'w-3.5 h-3.5' : 'w-3 h-3'} />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-64">
@@ -76,7 +82,7 @@ export function BranchSwitchDropdown({
         <div className="max-h-[250px] overflow-y-auto">
           {isLoadingBranches ? (
             <DropdownMenuItem disabled className="text-xs">
-              <RefreshCw className="w-3.5 h-3.5 mr-2 animate-spin" />
+              <Spinner size="xs" className="mr-2" />
               Loading branches...
             </DropdownMenuItem>
           ) : filteredBranches.length === 0 ? (

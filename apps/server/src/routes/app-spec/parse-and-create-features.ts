@@ -5,8 +5,10 @@
 import path from 'path';
 import * as secureFs from '../../lib/secure-fs.js';
 import type { EventEmitter } from '../../lib/events.js';
-import { createLogger } from '@automaker/utils';
+import { createLogger, atomicWriteJson, DEFAULT_BACKUP_COUNT } from '@automaker/utils';
 import { getFeaturesDir } from '@automaker/platform';
+import { extractJsonWithArray } from '../../lib/json-extractor.js';
+import { getNotificationService } from '../../services/notification-service.js';
 
 const logger = createLogger('SpecRegeneration');
 
@@ -22,23 +24,30 @@ export async function parseAndCreateFeatures(
   logger.info('========== END CONTENT ==========');
 
   try {
-    // Extract JSON from response
-    logger.info('Extracting JSON from response...');
-    logger.info(`Looking for pattern: /{[\\s\\S]*"features"[\\s\\S]*}/`);
-    const jsonMatch = content.match(/\{[\s\S]*"features"[\s\S]*\}/);
-    if (!jsonMatch) {
-      logger.error('❌ No valid JSON found in response');
+    // Extract JSON from response using shared utility
+    logger.info('Extracting JSON from response using extractJsonWithArray...');
+
+    interface FeaturesResponse {
+      features: Array<{
+        id: string;
+        category?: string;
+        title: string;
+        description: string;
+        priority?: number;
+        complexity?: string;
+        dependencies?: string[];
+      }>;
+    }
+
+    const parsed = extractJsonWithArray<FeaturesResponse>(content, 'features', { logger });
+
+    if (!parsed || !parsed.features) {
+      logger.error('❌ No valid JSON with "features" array found in response');
       logger.error('Full content received:');
       logger.error(content);
       throw new Error('No valid JSON found in response');
     }
 
-    logger.info(`JSON match found (${jsonMatch[0].length} chars)`);
-    logger.info('========== MATCHED JSON ==========');
-    logger.info(jsonMatch[0]);
-    logger.info('========== END MATCHED JSON ==========');
-
-    const parsed = JSON.parse(jsonMatch[0]);
     logger.info(`Parsed ${parsed.features?.length || 0} features`);
     logger.info('Parsed features:', JSON.stringify(parsed.features, null, 2));
 
@@ -65,10 +74,10 @@ export async function parseAndCreateFeatures(
         updatedAt: new Date().toISOString(),
       };
 
-      await secureFs.writeFile(
-        path.join(featureDir, 'feature.json'),
-        JSON.stringify(featureData, null, 2)
-      );
+      // Use atomic write with backup support for crash protection
+      await atomicWriteJson(path.join(featureDir, 'feature.json'), featureData, {
+        backupCount: DEFAULT_BACKUP_COUNT,
+      });
 
       createdFeatures.push({ id: feature.id, title: feature.title });
     }
@@ -78,6 +87,15 @@ export async function parseAndCreateFeatures(
     events.emit('spec-regeneration:event', {
       type: 'spec_regeneration_complete',
       message: `Spec regeneration complete! Created ${createdFeatures.length} features.`,
+      projectPath: projectPath,
+    });
+
+    // Create notification for spec generation completion
+    const notificationService = getNotificationService();
+    await notificationService.createNotification({
+      type: 'spec_regeneration_complete',
+      title: 'Spec Generation Complete',
+      message: `Created ${createdFeatures.length} features from the project specification.`,
       projectPath: projectPath,
     });
   } catch (error) {

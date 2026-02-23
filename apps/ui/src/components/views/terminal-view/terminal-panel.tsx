@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
+import { createLogger } from '@automaker/utils/logger';
 import {
   X,
   SplitSquareHorizontal,
@@ -12,7 +13,6 @@ import {
   CheckSquare,
   Trash2,
   ImageIcon,
-  Loader2,
   Settings,
   RotateCcw,
   Search,
@@ -21,14 +21,23 @@ import {
   Maximize2,
   Minimize2,
   ArrowDown,
+  GitBranch,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Spinner } from '@/components/ui/spinner';
 import { cn } from '@/lib/utils';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Slider } from '@/components/ui/slider';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { useDraggable, useDroppable } from '@dnd-kit/core';
 import { useAppStore, DEFAULT_KEYBOARD_SHORTCUTS, type KeyboardShortcuts } from '@/store/app-store';
 import { useShallow } from 'zustand/react/shallow';
@@ -36,11 +45,15 @@ import { matchesShortcutWithCode } from '@/hooks/use-keyboard-shortcuts';
 import {
   getTerminalTheme,
   TERMINAL_FONT_OPTIONS,
-  DEFAULT_TERMINAL_FONT,
+  getTerminalFontFamily,
 } from '@/config/terminal-themes';
+import { DEFAULT_FONT_VALUE } from '@/config/ui-font-options';
 import { toast } from 'sonner';
 import { getElectronAPI } from '@/lib/electron';
 import { getApiKey, getSessionToken, getServerUrlSync } from '@/lib/http-api-client';
+
+const logger = createLogger('Terminal');
+const NO_STORE_CACHE_MODE: RequestCache = 'no-store';
 
 // Font size constraints
 const MIN_FONT_SIZE = 8;
@@ -81,13 +94,13 @@ interface TerminalPanelProps {
   onCommandRan?: () => void; // Callback when the initial command has been sent
   isMaximized?: boolean;
   onToggleMaximize?: () => void;
+  branchName?: string; // Branch name to display in header (from "Open in Terminal" action)
 }
 
 // Type for xterm Terminal - we'll use any since we're dynamically importing
 type XTerminal = InstanceType<typeof import('@xterm/xterm').Terminal>;
 type XFitAddon = InstanceType<typeof import('@xterm/addon-fit').FitAddon>;
 type XSearchAddon = InstanceType<typeof import('@xterm/addon-search').SearchAddon>;
-type XWebLinksAddon = InstanceType<typeof import('@xterm/addon-web-links').WebLinksAddon>;
 
 export function TerminalPanel({
   sessionId,
@@ -111,6 +124,7 @@ export function TerminalPanel({
   onCommandRan,
   isMaximized = false,
   onToggleMaximize,
+  branchName,
 }: TerminalPanelProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -269,8 +283,8 @@ export function TerminalPanel({
     // - CSI sequences: \x1b[...letter
     // - OSC sequences: \x1b]...ST
     // - Other escape sequences: \x1b followed by various characters
-    // eslint-disable-next-line no-control-regex
     return text.replace(
+      // eslint-disable-next-line no-control-regex
       /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][AB012]|\x1b[>=<]|\x1b[78HM]|\x1b#[0-9]|\x1b./g,
       ''
     );
@@ -296,7 +310,7 @@ export function TerminalPanel({
       toast.success('Copied to clipboard');
       return true;
     } catch (err) {
-      console.error('[Terminal] Copy failed:', err);
+      logger.error('Copy failed:', err);
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       toast.error('Copy failed', {
         description: errorMessage.includes('permission')
@@ -361,7 +375,7 @@ export function TerminalPanel({
 
       await sendTextInChunks(text);
     } catch (err) {
-      console.error('[Terminal] Paste failed:', err);
+      logger.error('Paste failed:', err);
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       toast.error('Paste failed', {
         description: errorMessage.includes('permission')
@@ -501,10 +515,11 @@ export function TerminalPanel({
       const response = await fetch(`${serverUrl}/api/auth/token`, {
         headers,
         credentials: 'include',
+        cache: NO_STORE_CACHE_MODE,
       });
 
       if (!response.ok) {
-        console.warn('[Terminal] Failed to fetch wsToken:', response.status);
+        logger.warn('Failed to fetch wsToken:', response.status);
         return null;
       }
 
@@ -515,7 +530,7 @@ export function TerminalPanel({
 
       return null;
     } catch (error) {
-      console.error('[Terminal] Error fetching wsToken:', error);
+      logger.error('Error fetching wsToken:', error);
       return null;
     }
   }, [serverUrl]);
@@ -562,7 +577,7 @@ export function TerminalPanel({
       // Get settings from store (read at initialization time)
       const terminalSettings = useAppStore.getState().terminalState;
       const screenReaderEnabled = terminalSettings.screenReaderMode;
-      const terminalFontFamily = terminalSettings.fontFamily || DEFAULT_TERMINAL_FONT;
+      const terminalFontFamily = getTerminalFontFamily(terminalSettings.fontFamily);
       const terminalScrollback = terminalSettings.scrollbackLines || 5000;
       const terminalLineHeight = terminalSettings.lineHeight || 1.0;
 
@@ -595,7 +610,7 @@ export function TerminalPanel({
         const api = getElectronAPI();
         if (api?.openExternalLink) {
           api.openExternalLink(uri).catch((error) => {
-            console.error('[Terminal] Failed to open URL:', error);
+            logger.error('Failed to open URL:', error);
             // Fallback to window.open if Electron API fails
             window.open(uri, '_blank', 'noopener,noreferrer');
           });
@@ -653,8 +668,6 @@ export function TerminalPanel({
           while ((match = filePathRegex.exec(lineText)) !== null) {
             const fullMatch = match[1];
             const filePath = match[2];
-            const lineNum = match[3] ? parseInt(match[3], 10) : undefined;
-            const colNum = match[4] ? parseInt(match[4], 10) : undefined;
 
             // Skip common false positives (URLs, etc.)
             if (
@@ -697,7 +710,7 @@ export function TerminalPanel({
                     }
                   } catch {
                     // If we can't get home path, just use the path as-is
-                    console.warn('[Terminal] Could not resolve home directory path');
+                    logger.warn('Could not resolve home directory path');
                   }
                 } else if (!clickedPath.startsWith('/') && !clickedPath.match(/^[a-zA-Z]:\\/)) {
                   // Relative path - resolve against project path
@@ -721,7 +734,7 @@ export function TerminalPanel({
                     toast.error('Failed to open in editor', { description: result.error });
                   }
                 } catch (error) {
-                  console.error('[Terminal] Failed to open file:', error);
+                  logger.error('Failed to open file:', error);
                   toast.error('Failed to open file', {
                     description: error instanceof Error ? error.message : 'Unknown error',
                   });
@@ -744,7 +757,7 @@ export function TerminalPanel({
         });
         terminal.loadAddon(webglAddon);
       } catch {
-        console.warn('[Terminal] WebGL addon not available, falling back to canvas');
+        logger.warn('WebGL addon not available, falling back to canvas');
       }
 
       // Fit terminal to container - wait for stable dimensions
@@ -770,7 +783,7 @@ export function TerminalPanel({
           try {
             fitAddon.fit();
           } catch (err) {
-            console.error('[Terminal] Initial fit error:', err);
+            logger.error('Initial fit error:', err);
           }
           return;
         }
@@ -1000,7 +1013,7 @@ export function TerminalPanel({
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log(`[Terminal] WebSocket connected for session ${sessionId}`);
+        logger.info(`WebSocket connected for session ${sessionId}`);
 
         setConnectionStatus('connected');
         reconnectAttemptsRef.current = 0;
@@ -1037,7 +1050,7 @@ export function TerminalPanel({
               }
               break;
             case 'connected': {
-              console.log(`[Terminal] Session connected: ${msg.shell} in ${msg.cwd}`);
+              logger.info(`Session connected: ${msg.shell} in ${msg.cwd}`);
               // Detect shell type from path
               const shellPath = (msg.shell || '').toLowerCase();
               // Windows shells use backslash paths and include powershell/pwsh/cmd
@@ -1088,16 +1101,12 @@ export function TerminalPanel({
               break;
           }
         } catch (err) {
-          console.error('[Terminal] Message parse error:', err);
+          logger.error('Message parse error:', err);
         }
       };
 
       ws.onclose = (event) => {
-        console.log(
-          `[Terminal] WebSocket closed for session ${sessionId}:`,
-          event.code,
-          event.reason
-        );
+        logger.info(`WebSocket closed for session ${sessionId}: ${event.code} ${event.reason}`);
         wsRef.current = null;
 
         // Clear heartbeat interval
@@ -1167,8 +1176,8 @@ export function TerminalPanel({
         // Attempt reconnect after exponential delay
         reconnectTimeoutRef.current = setTimeout(() => {
           if (xtermRef.current) {
-            console.log(
-              `[Terminal] Attempting reconnect for session ${sessionId} (attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})`
+            logger.info(
+              `Attempting reconnect for session ${sessionId} (attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})`
             );
             connect();
           }
@@ -1176,7 +1185,7 @@ export function TerminalPanel({
       };
 
       ws.onerror = (error) => {
-        console.error(`[Terminal] WebSocket error for session ${sessionId}:`, error);
+        logger.error(`WebSocket error for session ${sessionId}:`, error);
       };
     };
 
@@ -1234,7 +1243,7 @@ export function TerminalPanel({
           wsRef.current.send(JSON.stringify({ type: 'resize', cols, rows }));
         }
       } catch (err) {
-        console.error('[Terminal] Resize error:', err);
+        logger.error('Resize error:', err);
       }
     }, RESIZE_DEBOUNCE_MS);
   }, []);
@@ -1268,7 +1277,7 @@ export function TerminalPanel({
 
   useEffect(() => {
     if (xtermRef.current && isTerminalReady) {
-      xtermRef.current.options.fontFamily = fontFamily;
+      xtermRef.current.options.fontFamily = getTerminalFontFamily(fontFamily);
       fitAddonRef.current?.fit();
     }
   }, [fontFamily, isTerminalReady]);
@@ -1551,7 +1560,7 @@ export function TerminalPanel({
         const api = getElectronAPI();
         if (!api.saveImageToTemp) {
           // Fallback path when Electron API is not available (browser mode)
-          console.warn('[Terminal] saveImageToTemp not available, returning fallback path');
+          logger.warn('saveImageToTemp not available, returning fallback path');
           return `.automaker/images/${Date.now()}_${filename}`;
         }
 
@@ -1560,10 +1569,10 @@ export function TerminalPanel({
         if (result.success && result.path) {
           return result.path;
         }
-        console.error('[Terminal] Failed to save image:', result.error);
+        logger.error('Failed to save image:', result.error);
         return null;
       } catch (error) {
-        console.error('[Terminal] Error saving image:', error);
+        logger.error('Error saving image:', error);
         return null;
       }
     },
@@ -1662,7 +1671,7 @@ export function TerminalPanel({
             toast.error(`Failed to save: ${file.name}`);
           }
         } catch (error) {
-          console.error('[Terminal] Error processing image:', error);
+          logger.error('Error processing image:', error);
           toast.error(`Error processing: ${file.name}`);
         }
       }
@@ -1733,7 +1742,7 @@ export function TerminalPanel({
           <div className="flex flex-col items-center gap-2 px-4 py-3 bg-blue-500/90 rounded-md text-white">
             {isProcessingImage ? (
               <>
-                <Loader2 className="h-6 w-6 animate-spin" />
+                <Spinner size="lg" />
                 <span className="text-sm font-medium">Processing...</span>
               </>
             ) : (
@@ -1766,6 +1775,13 @@ export function TerminalPanel({
         <div className="flex items-center gap-1.5 flex-1 min-w-0">
           <Terminal className="h-3 w-3 shrink-0 text-muted-foreground" />
           <span className="text-xs truncate text-foreground">{shellName}</span>
+          {/* Branch name indicator - show when terminal was opened from worktree */}
+          {branchName && (
+            <span className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-brand-500/10 text-brand-500 shrink-0">
+              <GitBranch className="h-2.5 w-2.5 shrink-0" />
+              <span>{branchName}</span>
+            </span>
+          )}
           {/* Font size indicator - only show when not default */}
           {fontSize !== DEFAULT_FONT_SIZE && (
             <button
@@ -1781,7 +1797,7 @@ export function TerminalPanel({
           )}
           {connectionStatus === 'reconnecting' && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-500 flex items-center gap-1">
-              <Loader2 className="h-2.5 w-2.5 animate-spin" />
+              <Spinner size="xs" />
               Reconnecting...
             </span>
           )}
@@ -1901,22 +1917,33 @@ export function TerminalPanel({
 
                 <div className="space-y-2">
                   <Label className="text-xs font-medium">Font Family</Label>
-                  <select
-                    value={fontFamily}
-                    onChange={(e) => {
-                      setTerminalFontFamily(e.target.value);
+                  <Select
+                    value={fontFamily || DEFAULT_FONT_VALUE}
+                    onValueChange={(value) => {
+                      setTerminalFontFamily(value);
                       toast.info('Font family changed', {
                         description: 'Restart terminal for changes to take effect',
                       });
                     }}
-                    className="w-full h-7 text-xs bg-background border border-input rounded-md px-2"
                   >
-                    {TERMINAL_FONT_OPTIONS.map((font) => (
-                      <option key={font.value} value={font.value}>
-                        {font.label}
-                      </option>
-                    ))}
-                  </select>
+                    <SelectTrigger className="w-full h-8 text-xs">
+                      <SelectValue placeholder="Default (Menlo / Monaco)" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {TERMINAL_FONT_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          <span
+                            style={{
+                              fontFamily:
+                                option.value === DEFAULT_FONT_VALUE ? undefined : option.value,
+                            }}
+                          >
+                            {option.label}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 <div className="space-y-2">

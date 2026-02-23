@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -10,7 +10,8 @@ import {
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
-import { Loader2, Trash2, AlertTriangle, FileWarning } from 'lucide-react';
+import { Trash2, AlertTriangle, FileWarning } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import { getElectronAPI } from '@/lib/electron';
 import { toast } from 'sonner';
 
@@ -30,6 +31,8 @@ interface DeleteWorktreeDialogProps {
   onDeleted: (deletedWorktree: WorktreeInfo, deletedBranch: boolean) => void;
   /** Number of features assigned to this worktree's branch */
   affectedFeatureCount?: number;
+  /** Default value for the "delete branch" checkbox */
+  defaultDeleteBranch?: boolean;
 }
 
 export function DeleteWorktreeDialog({
@@ -39,9 +42,17 @@ export function DeleteWorktreeDialog({
   worktree,
   onDeleted,
   affectedFeatureCount = 0,
+  defaultDeleteBranch = false,
 }: DeleteWorktreeDialogProps) {
-  const [deleteBranch, setDeleteBranch] = useState(false);
+  const [deleteBranch, setDeleteBranch] = useState(defaultDeleteBranch);
   const [isLoading, setIsLoading] = useState(false);
+
+  // Reset deleteBranch to default when dialog opens
+  useEffect(() => {
+    if (open) {
+      setDeleteBranch(defaultDeleteBranch);
+    }
+  }, [open, defaultDeleteBranch]);
 
   const handleDelete = async () => {
     if (!worktree) return;
@@ -137,7 +148,7 @@ export function DeleteWorktreeDialog({
           <Button variant="destructive" onClick={handleDelete} disabled={isLoading}>
             {isLoading ? (
               <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                <Spinner size="sm" className="mr-2" />
                 Deleting...
               </>
             ) : (

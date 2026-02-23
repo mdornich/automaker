@@ -12,6 +12,9 @@ import type { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import path from 'path';
 import * as secureFs from './secure-fs.js';
+import { createLogger } from '@automaker/utils';
+
+const logger = createLogger('Auth');
 
 const DATA_DIR = process.env.DATA_DIR || './data';
 const API_KEY_FILE = path.join(DATA_DIR, '.api-key');
@@ -19,6 +22,13 @@ const SESSIONS_FILE = path.join(DATA_DIR, '.sessions');
 const SESSION_COOKIE_NAME = 'automaker_session';
 const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const WS_TOKEN_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes for WebSocket connection tokens
+
+/**
+ * Check if an environment variable is set to 'true'
+ */
+function isEnvTrue(envVar: string | undefined): boolean {
+  return envVar === 'true';
+}
 
 // Session store - persisted to file for survival across server restarts
 const validSessions = new Map<string, { createdAt: number; expiresAt: number }>();
@@ -61,11 +71,11 @@ function loadSessions(): void {
       }
 
       if (loadedCount > 0 || expiredCount > 0) {
-        console.log(`[Auth] Loaded ${loadedCount} sessions (${expiredCount} expired)`);
+        logger.info(`Loaded ${loadedCount} sessions (${expiredCount} expired)`);
       }
     }
   } catch (error) {
-    console.warn('[Auth] Error loading sessions:', error);
+    logger.warn('Error loading sessions:', error);
   }
 }
 
@@ -81,7 +91,7 @@ async function saveSessions(): Promise<void> {
       mode: 0o600,
     });
   } catch (error) {
-    console.error('[Auth] Failed to save sessions:', error);
+    logger.error('Failed to save sessions:', error);
   }
 }
 
@@ -95,7 +105,7 @@ loadSessions();
 function ensureApiKey(): string {
   // First check environment variable (Electron passes it this way)
   if (process.env.AUTOMAKER_API_KEY) {
-    console.log('[Auth] Using API key from environment variable');
+    logger.info('Using API key from environment variable');
     return process.env.AUTOMAKER_API_KEY;
   }
 
@@ -104,12 +114,12 @@ function ensureApiKey(): string {
     if (secureFs.existsSync(API_KEY_FILE)) {
       const key = (secureFs.readFileSync(API_KEY_FILE, 'utf-8') as string).trim();
       if (key) {
-        console.log('[Auth] Loaded API key from file');
+        logger.info('Loaded API key from file');
         return key;
       }
     }
   } catch (error) {
-    console.warn('[Auth] Error reading API key file:', error);
+    logger.warn('Error reading API key file:', error);
   }
 
   // Generate new key
@@ -117,9 +127,9 @@ function ensureApiKey(): string {
   try {
     secureFs.mkdirSync(path.dirname(API_KEY_FILE), { recursive: true });
     secureFs.writeFileSync(API_KEY_FILE, newKey, { encoding: 'utf-8', mode: 0o600 });
-    console.log('[Auth] Generated new API key');
+    logger.info('Generated new API key');
   } catch (error) {
-    console.error('[Auth] Failed to save API key:', error);
+    logger.error('Failed to save API key:', error);
   }
   return newKey;
 }
@@ -127,22 +137,50 @@ function ensureApiKey(): string {
 // API key - always generated/loaded on startup for CSRF protection
 const API_KEY = ensureApiKey();
 
+// Width for log box content (excluding borders)
+const BOX_CONTENT_WIDTH = 67;
+
 // Print API key to console for web mode users (unless suppressed for production logging)
-if (process.env.AUTOMAKER_HIDE_API_KEY !== 'true') {
-  console.log(`
-╔═══════════════════════════════════════════════════════════════════════╗
-║  🔐 API Key for Web Mode Authentication                               ║
-╠═══════════════════════════════════════════════════════════════════════╣
-║                                                                       ║
-║  When accessing via browser, you'll be prompted to enter this key:    ║
-║                                                                       ║
-║    ${API_KEY}
-║                                                                       ║
-║  In Electron mode, authentication is handled automatically.          ║
-╚═══════════════════════════════════════════════════════════════════════╝
+if (!isEnvTrue(process.env.AUTOMAKER_HIDE_API_KEY)) {
+  const autoLoginEnabled = isEnvTrue(process.env.AUTOMAKER_AUTO_LOGIN);
+  const autoLoginStatus = autoLoginEnabled ? 'enabled (auto-login active)' : 'disabled';
+
+  // Build box lines with exact padding
+  const header = '🔐 API Key for Web Mode Authentication'.padEnd(BOX_CONTENT_WIDTH);
+  const line1 = "When accessing via browser, you'll be prompted to enter this key:".padEnd(
+    BOX_CONTENT_WIDTH
+  );
+  const line2 = API_KEY.padEnd(BOX_CONTENT_WIDTH);
+  const line3 = 'In Electron mode, authentication is handled automatically.'.padEnd(
+    BOX_CONTENT_WIDTH
+  );
+  const line4 = `Auto-login (AUTOMAKER_AUTO_LOGIN): ${autoLoginStatus}`.padEnd(BOX_CONTENT_WIDTH);
+  const tipHeader = '💡 Tips'.padEnd(BOX_CONTENT_WIDTH);
+  const line5 = 'Set AUTOMAKER_API_KEY env var to use a fixed key'.padEnd(BOX_CONTENT_WIDTH);
+  const line6 = 'Set AUTOMAKER_AUTO_LOGIN=true to skip the login prompt'.padEnd(BOX_CONTENT_WIDTH);
+
+  logger.info(`
+╔═════════════════════════════════════════════════════════════════════╗
+║  ${header}║
+╠═════════════════════════════════════════════════════════════════════╣
+║                                                                     ║
+║  ${line1}║
+║                                                                     ║
+║  ${line2}║
+║                                                                     ║
+║  ${line3}║
+║                                                                     ║
+║  ${line4}║
+║                                                                     ║
+╠═════════════════════════════════════════════════════════════════════╣
+║  ${tipHeader}║
+╠═════════════════════════════════════════════════════════════════════╣
+║  ${line5}║
+║  ${line6}║
+╚═════════════════════════════════════════════════════════════════════╝
 `);
 } else {
-  console.log('[Auth] API key banner hidden (AUTOMAKER_HIDE_API_KEY=true)');
+  logger.info('API key banner hidden (AUTOMAKER_HIDE_API_KEY=true)');
 }
 
 /**
@@ -177,7 +215,7 @@ export function validateSession(token: string): boolean {
   if (Date.now() > session.expiresAt) {
     validSessions.delete(token);
     // Fire-and-forget: persist removal asynchronously
-    saveSessions().catch((err) => console.error('[Auth] Error saving sessions:', err));
+    saveSessions().catch((err) => logger.error('Error saving sessions:', err));
     return false;
   }
 
@@ -259,7 +297,7 @@ export function getSessionCookieOptions(): {
   return {
     httpOnly: true, // JavaScript cannot access this cookie
     secure: process.env.NODE_ENV === 'production', // HTTPS only in production
-    sameSite: 'strict', // Only sent for same-site requests (CSRF protection)
+    sameSite: 'lax', // Sent for same-site requests and top-level navigations, but not cross-origin fetch/XHR
     maxAge: SESSION_MAX_AGE_MS,
     path: '/',
   };
@@ -315,6 +353,15 @@ function checkAuthentication(
     return { authenticated: false, errorType: 'invalid_api_key' };
   }
 
+  // Check for session token in query parameter (web mode - needed for image loads)
+  const queryToken = query.token;
+  if (queryToken) {
+    if (validateSession(queryToken)) {
+      return { authenticated: true };
+    }
+    return { authenticated: false, errorType: 'invalid_session' };
+  }
+
   // Check for session cookie (web mode)
   const sessionToken = cookies[SESSION_COOKIE_NAME];
   if (sessionToken && validateSession(sessionToken)) {
@@ -330,10 +377,17 @@ function checkAuthentication(
  * Accepts either:
  * 1. X-API-Key header (for Electron mode)
  * 2. X-Session-Token header (for web mode with explicit token)
- * 3. apiKey query parameter (fallback for cases where headers can't be set)
- * 4. Session cookie (for web mode)
+ * 3. apiKey query parameter (fallback for Electron, cases where headers can't be set)
+ * 4. token query parameter (fallback for web mode, needed for image loads via CSS/img tags)
+ * 5. Session cookie (for web mode)
  */
 export function authMiddleware(req: Request, res: Response, next: NextFunction): void {
+  // Allow disabling auth for local/trusted networks
+  if (isEnvTrue(process.env.AUTOMAKER_DISABLE_AUTH)) {
+    next();
+    return;
+  }
+
   const result = checkAuthentication(
     req.headers as Record<string, string | string[] | undefined>,
     req.query as Record<string, string | undefined>,
@@ -379,9 +433,10 @@ export function isAuthEnabled(): boolean {
  * Get authentication status for health endpoint
  */
 export function getAuthStatus(): { enabled: boolean; method: string } {
+  const disabled = isEnvTrue(process.env.AUTOMAKER_DISABLE_AUTH);
   return {
-    enabled: true,
-    method: 'api_key_or_session',
+    enabled: !disabled,
+    method: disabled ? 'disabled' : 'api_key_or_session',
   };
 }
 
@@ -389,6 +444,7 @@ export function getAuthStatus(): { enabled: boolean; method: string } {
  * Check if a request is authenticated (for status endpoint)
  */
 export function isRequestAuthenticated(req: Request): boolean {
+  if (isEnvTrue(process.env.AUTOMAKER_DISABLE_AUTH)) return true;
   const result = checkAuthentication(
     req.headers as Record<string, string | string[] | undefined>,
     req.query as Record<string, string | undefined>,
@@ -406,5 +462,6 @@ export function checkRawAuthentication(
   query: Record<string, string | undefined>,
   cookies: Record<string, string | undefined>
 ): boolean {
+  if (isEnvTrue(process.env.AUTOMAKER_DISABLE_AUTH)) return true;
   return checkAuthentication(headers, query, cookies).authenticated;
 }

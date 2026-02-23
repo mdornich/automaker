@@ -1,124 +1,268 @@
-import { HotkeyButton } from '@/components/ui/hotkey-button';
-import { Button } from '@/components/ui/button';
-import { Slider } from '@/components/ui/slider';
+import { useCallback, useState } from 'react';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
-import { Plus, Bot, Wand2 } from 'lucide-react';
-import { KeyboardShortcut } from '@/hooks/use-keyboard-shortcuts';
-import { ClaudeUsagePopover } from '@/components/claude-usage-popover';
+import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Wand2, GitBranch, ClipboardCheck, RefreshCw } from 'lucide-react';
+import { UsagePopover } from '@/components/usage-popover';
 import { useAppStore } from '@/store/app-store';
 import { useSetupStore } from '@/store/setup-store';
+import { useIsTablet } from '@/hooks/use-media-query';
+import { AutoModeSettingsPopover } from './dialogs/auto-mode-settings-popover';
+import { WorktreeSettingsPopover } from './dialogs/worktree-settings-popover';
+import { PlanSettingsPopover } from './dialogs/plan-settings-popover';
+import { getHttpApiClient } from '@/lib/http-api-client';
+import { BoardSearchBar } from './board-search-bar';
+import { BoardControls } from './board-controls';
+import { ViewToggle, type ViewMode } from './components';
+import { HeaderMobileMenu } from './header-mobile-menu';
+
+export type { ViewMode };
 
 interface BoardHeaderProps {
-  projectName: string;
+  projectPath: string;
   maxConcurrency: number;
   runningAgentsCount: number;
   onConcurrencyChange: (value: number) => void;
   isAutoModeRunning: boolean;
   onAutoModeToggle: (enabled: boolean) => void;
-  onAddFeature: () => void;
   onOpenPlanDialog: () => void;
-  addFeatureShortcut: KeyboardShortcut;
+  hasPendingPlan?: boolean;
+  onOpenPendingPlan?: () => void;
   isMounted: boolean;
+  // Search bar props
+  searchQuery: string;
+  onSearchChange: (query: string) => void;
+  isCreatingSpec: boolean;
+  creatingSpecProjectPath?: string;
+  // Board controls props
+  onShowBoardBackground: () => void;
+  onRefreshBoard: () => Promise<void>;
+  // View toggle props
+  viewMode: ViewMode;
+  onViewModeChange: (mode: ViewMode) => void;
 }
 
+// Shared styles for header control containers
+const controlContainerClass =
+  'flex items-center gap-1.5 px-3 h-8 rounded-md bg-secondary border border-border';
+
 export function BoardHeader({
-  projectName,
+  projectPath,
   maxConcurrency,
   runningAgentsCount,
   onConcurrencyChange,
   isAutoModeRunning,
   onAutoModeToggle,
-  onAddFeature,
   onOpenPlanDialog,
-  addFeatureShortcut,
+  hasPendingPlan,
+  onOpenPendingPlan,
   isMounted,
+  searchQuery,
+  onSearchChange,
+  isCreatingSpec,
+  creatingSpecProjectPath,
+  onShowBoardBackground,
+  onRefreshBoard,
+  viewMode,
+  onViewModeChange,
 }: BoardHeaderProps) {
-  const apiKeys = useAppStore((state) => state.apiKeys);
   const claudeAuthStatus = useSetupStore((state) => state.claudeAuthStatus);
+  const skipVerificationInAutoMode = useAppStore((state) => state.skipVerificationInAutoMode);
+  const setSkipVerificationInAutoMode = useAppStore((state) => state.setSkipVerificationInAutoMode);
+  const planUseSelectedWorktreeBranch = useAppStore((state) => state.planUseSelectedWorktreeBranch);
+  const setPlanUseSelectedWorktreeBranch = useAppStore(
+    (state) => state.setPlanUseSelectedWorktreeBranch
+  );
+  const addFeatureUseSelectedWorktreeBranch = useAppStore(
+    (state) => state.addFeatureUseSelectedWorktreeBranch
+  );
+  const setAddFeatureUseSelectedWorktreeBranch = useAppStore(
+    (state) => state.setAddFeatureUseSelectedWorktreeBranch
+  );
+  const codexAuthStatus = useSetupStore((state) => state.codexAuthStatus);
 
-  // Hide usage tracking when using API key (only show for Claude Code CLI users)
-  // Check both user-entered API key and environment variable ANTHROPIC_API_KEY
-  // Also hide on Windows for now (CLI usage command not supported)
-  // Only show if CLI has been verified/authenticated
-  const isWindows =
-    typeof navigator !== 'undefined' && navigator.platform?.toLowerCase().includes('win');
-  const hasApiKey = !!apiKeys.anthropic || !!claudeAuthStatus?.hasEnvApiKey;
-  const isCliVerified =
-    claudeAuthStatus?.authenticated && claudeAuthStatus?.method === 'cli_authenticated';
-  const showUsageTracking = !hasApiKey && !isWindows && isCliVerified;
+  // Worktree panel visibility (per-project)
+  const worktreePanelVisibleByProject = useAppStore((state) => state.worktreePanelVisibleByProject);
+  const setWorktreePanelVisible = useAppStore((state) => state.setWorktreePanelVisible);
+  const isWorktreePanelVisible = worktreePanelVisibleByProject[projectPath] ?? true;
+
+  const handleWorktreePanelToggle = useCallback(
+    async (visible: boolean) => {
+      // Update local store
+      setWorktreePanelVisible(projectPath, visible);
+
+      // Persist to server
+      try {
+        const httpClient = getHttpApiClient();
+        await httpClient.settings.updateProject(projectPath, {
+          worktreePanelVisible: visible,
+        });
+      } catch (error) {
+        console.error('Failed to persist worktree panel visibility:', error);
+      }
+    },
+    [projectPath, setWorktreePanelVisible]
+  );
+
+  const isClaudeCliVerified = !!claudeAuthStatus?.authenticated;
+  const showClaudeUsage = isClaudeCliVerified;
+
+  // Codex usage tracking visibility logic
+  // Show if Codex is authenticated (CLI or API key)
+  const showCodexUsage = !!codexAuthStatus?.authenticated;
+
+  // State for mobile actions panel
+  const [showActionsPanel, setShowActionsPanel] = useState(false);
+  const [isRefreshingBoard, setIsRefreshingBoard] = useState(false);
+
+  const isTablet = useIsTablet();
+
+  const handleRefreshBoard = useCallback(async () => {
+    if (isRefreshingBoard) return;
+    setIsRefreshingBoard(true);
+    try {
+      await onRefreshBoard();
+    } finally {
+      setIsRefreshingBoard(false);
+    }
+  }, [isRefreshingBoard, onRefreshBoard]);
 
   return (
-    <div className="flex items-center justify-between p-4 border-b border-border bg-glass backdrop-blur-md">
-      <div>
-        <h1 className="text-xl font-bold">Kanban Board</h1>
-        <p className="text-sm text-muted-foreground">{projectName}</p>
+    <div className="flex items-center justify-between gap-5 p-4 border-b border-border bg-glass backdrop-blur-md">
+      <div className="flex items-center gap-4">
+        <BoardSearchBar
+          searchQuery={searchQuery}
+          onSearchChange={onSearchChange}
+          isCreatingSpec={isCreatingSpec}
+          creatingSpecProjectPath={creatingSpecProjectPath}
+          currentProjectPath={projectPath}
+        />
+        {isMounted && <ViewToggle viewMode={viewMode} onViewModeChange={onViewModeChange} />}
+        <BoardControls isMounted={isMounted} onShowBoardBackground={onShowBoardBackground} />
       </div>
-      <div className="flex gap-2 items-center">
-        {/* Usage Popover - only show for CLI users (not API key users) */}
-        {isMounted && showUsageTracking && <ClaudeUsagePopover />}
+      <div className="flex gap-4 items-center">
+        {isMounted && !isTablet && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="secondary"
+                size="icon-sm"
+                onClick={handleRefreshBoard}
+                disabled={isRefreshingBoard}
+                aria-label="Refresh board state from server"
+              >
+                <RefreshCw className={isRefreshingBoard ? 'w-4 h-4 animate-spin' : 'w-4 h-4'} />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">Refresh board state from server</TooltipContent>
+          </Tooltip>
+        )}
+        {/* Usage Popover - show if either provider is authenticated, only on desktop */}
+        {isMounted && !isTablet && (showClaudeUsage || showCodexUsage) && <UsagePopover />}
 
-        {/* Concurrency Slider - only show after mount to prevent hydration issues */}
-        {isMounted && (
-          <div
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-secondary border border-border"
-            data-testid="concurrency-slider-container"
-          >
-            <Bot className="w-4 h-4 text-muted-foreground" />
-            <span className="text-sm font-medium">Agents</span>
-            <Slider
-              value={[maxConcurrency]}
-              onValueChange={(value) => onConcurrencyChange(value[0])}
-              min={1}
-              max={10}
-              step={1}
-              className="w-20"
-              data-testid="concurrency-slider"
-            />
-            <span
-              className="text-sm text-muted-foreground min-w-[5ch] text-center"
-              data-testid="concurrency-value"
+        {/* Tablet/Mobile view: show hamburger menu with all controls */}
+        {isMounted && isTablet && (
+          <HeaderMobileMenu
+            isOpen={showActionsPanel}
+            onToggle={() => setShowActionsPanel(!showActionsPanel)}
+            isWorktreePanelVisible={isWorktreePanelVisible}
+            onWorktreePanelToggle={handleWorktreePanelToggle}
+            maxConcurrency={maxConcurrency}
+            runningAgentsCount={runningAgentsCount}
+            onConcurrencyChange={onConcurrencyChange}
+            isAutoModeRunning={isAutoModeRunning}
+            onAutoModeToggle={onAutoModeToggle}
+            skipVerificationInAutoMode={skipVerificationInAutoMode}
+            onSkipVerificationChange={setSkipVerificationInAutoMode}
+            onOpenPlanDialog={onOpenPlanDialog}
+            showClaudeUsage={showClaudeUsage}
+            showCodexUsage={showCodexUsage}
+          />
+        )}
+
+        {/* Desktop view: show full controls */}
+        {/* Worktrees Toggle - only show after mount to prevent hydration issues */}
+        {isMounted && !isTablet && (
+          <div className={controlContainerClass} data-testid="worktrees-toggle-container">
+            <GitBranch className="w-4 h-4 text-muted-foreground" />
+            <Label
+              htmlFor="worktrees-toggle"
+              className="text-xs font-medium cursor-pointer whitespace-nowrap"
             >
-              {runningAgentsCount} / {maxConcurrency}
-            </span>
+              Worktree Bar
+            </Label>
+            <Switch
+              id="worktrees-toggle"
+              checked={isWorktreePanelVisible}
+              onCheckedChange={handleWorktreePanelToggle}
+              data-testid="worktrees-toggle"
+            />
+            <WorktreeSettingsPopover
+              addFeatureUseSelectedWorktreeBranch={addFeatureUseSelectedWorktreeBranch}
+              onAddFeatureUseSelectedWorktreeBranchChange={setAddFeatureUseSelectedWorktreeBranch}
+            />
           </div>
         )}
 
         {/* Auto Mode Toggle - only show after mount to prevent hydration issues */}
-        {isMounted && (
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-secondary border border-border">
-            <Label htmlFor="auto-mode-toggle" className="text-sm font-medium cursor-pointer">
+        {isMounted && !isTablet && (
+          <div className={controlContainerClass} data-testid="auto-mode-toggle-container">
+            <Label
+              htmlFor="auto-mode-toggle"
+              className="text-xs font-medium cursor-pointer whitespace-nowrap"
+            >
               Auto Mode
             </Label>
+            <span
+              className="text-[10px] font-medium text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded"
+              data-testid="auto-mode-max-concurrency"
+              title="Max concurrent agents"
+            >
+              {maxConcurrency}
+            </span>
             <Switch
               id="auto-mode-toggle"
               checked={isAutoModeRunning}
               onCheckedChange={onAutoModeToggle}
               data-testid="auto-mode-toggle"
             />
+            <AutoModeSettingsPopover
+              skipVerificationInAutoMode={skipVerificationInAutoMode}
+              onSkipVerificationChange={setSkipVerificationInAutoMode}
+              maxConcurrency={maxConcurrency}
+              runningAgentsCount={runningAgentsCount}
+              onConcurrencyChange={onConcurrencyChange}
+            />
           </div>
         )}
 
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={onOpenPlanDialog}
-          data-testid="plan-backlog-button"
-        >
-          <Wand2 className="w-4 h-4 mr-2" />
-          Plan
-        </Button>
-
-        <HotkeyButton
-          size="sm"
-          onClick={onAddFeature}
-          hotkey={addFeatureShortcut}
-          hotkeyActive={false}
-          data-testid="add-feature-button"
-        >
-          <Plus className="w-4 h-4 mr-2" />
-          Add Feature
-        </HotkeyButton>
+        {/* Plan Button with Settings - only show on desktop, tablet/mobile has it in the panel */}
+        {isMounted && !isTablet && (
+          <div className={controlContainerClass} data-testid="plan-button-container">
+            {hasPendingPlan && (
+              <button
+                onClick={onOpenPendingPlan || onOpenPlanDialog}
+                className="flex items-center gap-1.5 text-emerald-500 hover:text-emerald-400 transition-colors"
+                data-testid="plan-review-button"
+              >
+                <ClipboardCheck className="w-4 h-4" />
+              </button>
+            )}
+            <button
+              onClick={onOpenPlanDialog}
+              className="flex items-center gap-1.5 hover:text-foreground transition-colors"
+              data-testid="plan-backlog-button"
+            >
+              <Wand2 className="w-4 h-4 text-muted-foreground" />
+              <span className="text-sm font-medium">Plan</span>
+            </button>
+            <PlanSettingsPopover
+              planUseSelectedWorktreeBranch={planUseSelectedWorktreeBranch}
+              onPlanUseSelectedWorktreeBranchChange={setPlanUseSelectedWorktreeBranch}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

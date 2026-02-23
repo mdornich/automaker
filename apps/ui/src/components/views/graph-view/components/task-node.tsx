@@ -18,6 +18,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { TaskNodeData } from '../hooks/use-graph-nodes';
+import { GRAPH_RENDER_MODE_COMPACT } from '../constants';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -25,7 +26,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 type TaskNodeProps = NodeProps & {
   data: TaskNodeData;
@@ -60,13 +61,6 @@ const statusConfig = {
     borderClass: 'border-[var(--status-success)]',
     bgClass: 'bg-[var(--status-success-bg)]',
   },
-  completed: {
-    icon: CheckCircle2,
-    label: 'Completed',
-    colorClass: 'text-[var(--status-success)]',
-    borderClass: 'border-[var(--status-success)]/50',
-    bgClass: 'bg-[var(--status-success-bg)]/50',
-  },
 };
 
 const priorityConfig = {
@@ -75,10 +69,33 @@ const priorityConfig = {
   3: { label: 'Low', colorClass: 'bg-[var(--status-info)] text-white' },
 };
 
+// Helper function to get border style with opacity (like KanbanCard does)
+function getCardBorderStyle(
+  enabled: boolean,
+  opacity: number,
+  borderColor: string
+): React.CSSProperties {
+  if (!enabled) {
+    return { borderWidth: '0px', borderColor: 'transparent' };
+  }
+  if (opacity !== 100) {
+    return {
+      borderWidth: '2px',
+      borderColor: `color-mix(in oklch, ${borderColor} ${opacity}%, transparent)`,
+    };
+  }
+  return { borderWidth: '2px' };
+}
+
 export const TaskNode = memo(function TaskNode({ data, selected }: TaskNodeProps) {
   // Handle pipeline statuses by treating them like in_progress
+  // Treat completed (archived) as verified for display
   const status = data.status || 'backlog';
-  const statusKey = status.startsWith('pipeline_') ? 'in_progress' : status;
+  const statusKey = status.startsWith('pipeline_')
+    ? 'in_progress'
+    : status === 'completed'
+      ? 'verified'
+      : status;
   const config = statusConfig[statusKey as keyof typeof statusConfig] || statusConfig.backlog;
   const StatusIcon = config.icon;
   const priorityConf = data.priority ? priorityConfig[data.priority as 1 | 2 | 3] : null;
@@ -90,6 +107,123 @@ export const TaskNode = memo(function TaskNode({ data, selected }: TaskNodeProps
 
   // Task is stopped if it's in_progress but not actively running
   const isStopped = data.status === 'in_progress' && !data.isRunning;
+
+  // Background/theme settings with defaults
+  const cardOpacity = data.cardOpacity ?? 100;
+  const shouldUseGlassmorphism = data.cardGlassmorphism ?? true;
+  const cardBorderEnabled = data.cardBorderEnabled ?? true;
+  const cardBorderOpacity = data.cardBorderOpacity ?? 100;
+  const isCompact = data.renderMode === GRAPH_RENDER_MODE_COMPACT;
+  const glassmorphism = shouldUseGlassmorphism && !isCompact;
+
+  // Get the border color based on status and error state
+  const borderColor = data.error
+    ? 'var(--status-error)'
+    : config.borderClass.includes('border-border')
+      ? 'var(--border)'
+      : config.borderClass.includes('status-in-progress')
+        ? 'var(--status-in-progress)'
+        : config.borderClass.includes('status-waiting')
+          ? 'var(--status-waiting)'
+          : config.borderClass.includes('status-success')
+            ? 'var(--status-success)'
+            : 'var(--border)';
+
+  // Get computed border style
+  const borderStyle = getCardBorderStyle(cardBorderEnabled, cardBorderOpacity, borderColor);
+
+  if (isCompact) {
+    return (
+      <>
+        <Handle
+          id="target"
+          type="target"
+          position={Position.Left}
+          isConnectable={true}
+          className={cn(
+            'w-3 h-3 !bg-border border-2 border-background',
+            'transition-colors duration-200',
+            'hover:!bg-brand-500',
+            isDimmed && 'opacity-30'
+          )}
+        />
+
+        <div
+          className={cn(
+            'min-w-[200px] max-w-[240px] rounded-lg shadow-sm relative',
+            'transition-all duration-200',
+            selected && 'ring-2 ring-brand-500 ring-offset-1 ring-offset-background',
+            isMatched && 'graph-node-matched',
+            isHighlighted && !isMatched && 'graph-node-highlighted',
+            isDimmed && 'graph-node-dimmed'
+          )}
+          style={borderStyle}
+        >
+          <div
+            className="absolute inset-0 rounded-lg bg-card"
+            style={{ opacity: cardOpacity / 100 }}
+          />
+          <div className={cn('relative flex items-center gap-2 px-2.5 py-2', config.bgClass)}>
+            <StatusIcon className={cn('w-3.5 h-3.5', config.colorClass)} />
+            <span className={cn('text-[11px] font-medium', config.colorClass)}>{config.label}</span>
+            {priorityConf && (
+              <span
+                className={cn(
+                  'ml-auto text-[9px] font-bold px-1.5 py-0.5 rounded',
+                  priorityConf.colorClass
+                )}
+              >
+                {data.priority === 1 ? 'H' : data.priority === 2 ? 'M' : 'L'}
+              </span>
+            )}
+          </div>
+          <div className="relative px-2.5 py-2">
+            <p
+              className={cn(
+                'text-xs text-foreground line-clamp-2',
+                data.title ? 'font-medium' : 'font-semibold'
+              )}
+            >
+              {data.title || data.description}
+            </p>
+            {data.title && data.description && (
+              <p className="text-[11px] text-muted-foreground line-clamp-1 mt-1">
+                {data.description}
+              </p>
+            )}
+            {data.isRunning && (
+              <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">
+                <span className="inline-flex w-1.5 h-1.5 rounded-full bg-[var(--status-in-progress)]" />
+                Running
+              </div>
+            )}
+            {isStopped && (
+              <div className="mt-2 flex items-center gap-2 text-[10px] text-[var(--status-warning)]">
+                <span className="inline-flex w-1.5 h-1.5 rounded-full bg-[var(--status-warning)]" />
+                Paused
+              </div>
+            )}
+          </div>
+        </div>
+
+        <Handle
+          id="source"
+          type="source"
+          position={Position.Right}
+          isConnectable={true}
+          className={cn(
+            'w-3 h-3 !bg-border border-2 border-background',
+            'transition-colors duration-200',
+            'hover:!bg-brand-500',
+            data.status === 'completed' || data.status === 'verified'
+              ? '!bg-[var(--status-success)]'
+              : '',
+            isDimmed && 'opacity-30'
+          )}
+        />
+      </>
+    );
+  }
 
   return (
     <>
@@ -109,22 +243,26 @@ export const TaskNode = memo(function TaskNode({ data, selected }: TaskNodeProps
 
       <div
         className={cn(
-          'min-w-[240px] max-w-[280px] rounded-xl border-2 bg-card shadow-md',
+          'min-w-[240px] max-w-[280px] rounded-xl shadow-md relative',
           'transition-all duration-300',
-          config.borderClass,
           selected && 'ring-2 ring-brand-500 ring-offset-2 ring-offset-background',
           data.isRunning && 'animate-pulse-subtle',
-          data.error && 'border-[var(--status-error)]',
           // Filter highlight states
           isMatched && 'graph-node-matched',
           isHighlighted && !isMatched && 'graph-node-highlighted',
           isDimmed && 'graph-node-dimmed'
         )}
+        style={borderStyle}
       >
+        {/* Background layer with opacity control - like KanbanCard */}
+        <div
+          className={cn('absolute inset-0 rounded-xl bg-card', glassmorphism && 'backdrop-blur-sm')}
+          style={{ opacity: cardOpacity / 100 }}
+        />
         {/* Header with status and actions */}
         <div
           className={cn(
-            'flex items-center justify-between px-3 py-2 rounded-t-[10px]',
+            'relative flex items-center justify-between px-3 py-2 rounded-t-[10px]',
             config.bgClass
           )}
         >
@@ -148,50 +286,44 @@ export const TaskNode = memo(function TaskNode({ data, selected }: TaskNodeProps
 
             {/* Blocked indicator */}
             {data.isBlocked && !data.error && data.status === 'backlog' && (
-              <TooltipProvider delayDuration={200}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div className="p-1 rounded bg-orange-500/20">
-                      <Lock className="w-3 h-3 text-orange-500" />
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" className="text-xs max-w-[200px]">
-                    <p>Blocked by {data.blockingDependencies.length} dependencies</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="p-1 rounded bg-orange-500/20">
+                    <Lock className="w-3 h-3 text-orange-500" />
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="text-xs max-w-[200px]">
+                  <p>Blocked by {data.blockingDependencies.length} dependencies</p>
+                </TooltipContent>
+              </Tooltip>
             )}
 
             {/* Error indicator */}
             {data.error && (
-              <TooltipProvider delayDuration={200}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div className="p-1 rounded bg-[var(--status-error-bg)]">
-                      <AlertCircle className="w-3 h-3 text-[var(--status-error)]" />
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" className="text-xs max-w-[250px]">
-                    <p>{data.error}</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="p-1 rounded bg-[var(--status-error-bg)]">
+                    <AlertCircle className="w-3 h-3 text-[var(--status-error)]" />
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="text-xs max-w-[250px]">
+                  <p>{data.error}</p>
+                </TooltipContent>
+              </Tooltip>
             )}
 
             {/* Stopped indicator - task is in_progress but not actively running */}
             {isStopped && (
-              <TooltipProvider delayDuration={200}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div className="p-1 rounded bg-[var(--status-warning-bg)]">
-                      <Pause className="w-3 h-3 text-[var(--status-warning)]" />
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" className="text-xs max-w-[200px]">
-                    <p>Task paused - click menu to resume</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="p-1 rounded bg-[var(--status-warning-bg)]">
+                    <Pause className="w-3 h-3 text-[var(--status-warning)]" />
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="text-xs max-w-[200px]">
+                  <p>Task paused - click menu to resume</p>
+                </TooltipContent>
+              </Tooltip>
             )}
 
             {/* Actions dropdown */}
@@ -301,7 +433,7 @@ export const TaskNode = memo(function TaskNode({ data, selected }: TaskNodeProps
         </div>
 
         {/* Content */}
-        <div className="px-3 py-2">
+        <div className="relative px-3 py-2">
           {/* Category */}
           <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wide">
             {data.category}

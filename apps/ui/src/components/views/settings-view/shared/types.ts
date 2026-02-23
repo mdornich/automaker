@@ -26,6 +26,10 @@ export interface Project {
   name: string;
   path: string;
   theme?: string;
+  fontFamilySans?: string;
+  fontFamilyMono?: string;
+  icon?: string;
+  customIconPath?: string;
 }
 
 export interface ApiKeys {

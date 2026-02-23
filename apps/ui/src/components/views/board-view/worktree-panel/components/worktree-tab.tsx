@@ -1,8 +1,18 @@
+import type { JSX } from 'react';
 import { Button } from '@/components/ui/button';
-import { RefreshCw, Globe, Loader2, CircleDot, GitPullRequest } from 'lucide-react';
+import { Globe, CircleDot, GitPullRequest } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import { cn } from '@/lib/utils';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import type { WorktreeInfo, BranchInfo, DevServerInfo, PRInfo, GitRepoStatus } from '../types';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { useDroppable } from '@dnd-kit/core';
+import type {
+  WorktreeInfo,
+  BranchInfo,
+  DevServerInfo,
+  PRInfo,
+  GitRepoStatus,
+  TestSessionInfo,
+} from '../types';
 import { BranchSwitchDropdown } from './branch-switch-dropdown';
 import { WorktreeActionsDropdown } from './worktree-actions-dropdown';
 
@@ -16,7 +26,6 @@ interface WorktreeTabProps {
   isActivating: boolean;
   isDevServerRunning: boolean;
   devServerInfo?: DevServerInfo;
-  defaultEditorName: string;
   branches: BranchInfo[];
   filteredBranches: BranchInfo[];
   branchFilter: string;
@@ -27,7 +36,16 @@ interface WorktreeTabProps {
   isStartingDevServer: boolean;
   aheadCount: number;
   behindCount: number;
+  hasRemoteBranch: boolean;
   gitRepoStatus: GitRepoStatus;
+  /** Whether auto mode is running for this worktree */
+  isAutoModeRunning?: boolean;
+  /** Whether tests are being started for this worktree */
+  isStartingTests?: boolean;
+  /** Whether tests are currently running for this worktree */
+  isTestRunning?: boolean;
+  /** Active test session info for this worktree */
+  testSessionInfo?: TestSessionInfo;
   onSelectWorktree: (worktree: WorktreeInfo) => void;
   onBranchDropdownOpenChange: (open: boolean) => void;
   onActionsDropdownOpenChange: (open: boolean) => void;
@@ -36,15 +54,33 @@ interface WorktreeTabProps {
   onCreateBranch: (worktree: WorktreeInfo) => void;
   onPull: (worktree: WorktreeInfo) => void;
   onPush: (worktree: WorktreeInfo) => void;
-  onOpenInEditor: (worktree: WorktreeInfo) => void;
+  onPushNewBranch: (worktree: WorktreeInfo) => void;
+  onOpenInEditor: (worktree: WorktreeInfo, editorCommand?: string) => void;
+  onOpenInIntegratedTerminal: (worktree: WorktreeInfo, mode?: 'tab' | 'split') => void;
+  onOpenInExternalTerminal: (worktree: WorktreeInfo, terminalId?: string) => void;
+  onViewChanges: (worktree: WorktreeInfo) => void;
+  onDiscardChanges: (worktree: WorktreeInfo) => void;
   onCommit: (worktree: WorktreeInfo) => void;
   onCreatePR: (worktree: WorktreeInfo) => void;
   onAddressPRComments: (worktree: WorktreeInfo, prInfo: PRInfo) => void;
   onResolveConflicts: (worktree: WorktreeInfo) => void;
+  onMerge: (worktree: WorktreeInfo) => void;
   onDeleteWorktree: (worktree: WorktreeInfo) => void;
   onStartDevServer: (worktree: WorktreeInfo) => void;
   onStopDevServer: (worktree: WorktreeInfo) => void;
   onOpenDevServerUrl: (worktree: WorktreeInfo) => void;
+  onViewDevServerLogs: (worktree: WorktreeInfo) => void;
+  onRunInitScript: (worktree: WorktreeInfo) => void;
+  onToggleAutoMode?: (worktree: WorktreeInfo) => void;
+  /** Start running tests for this worktree */
+  onStartTests?: (worktree: WorktreeInfo) => void;
+  /** Stop running tests for this worktree */
+  onStopTests?: (worktree: WorktreeInfo) => void;
+  /** View test logs for this worktree */
+  onViewTestLogs?: (worktree: WorktreeInfo) => void;
+  hasInitScript: boolean;
+  /** Whether a test command is configured in project settings */
+  hasTestCommand?: boolean;
 }
 
 export function WorktreeTab({
@@ -57,7 +93,6 @@ export function WorktreeTab({
   isActivating,
   isDevServerRunning,
   devServerInfo,
-  defaultEditorName,
   branches,
   filteredBranches,
   branchFilter,
@@ -68,7 +103,12 @@ export function WorktreeTab({
   isStartingDevServer,
   aheadCount,
   behindCount,
+  hasRemoteBranch,
   gitRepoStatus,
+  isAutoModeRunning = false,
+  isStartingTests = false,
+  isTestRunning = false,
+  testSessionInfo,
   onSelectWorktree,
   onBranchDropdownOpenChange,
   onActionsDropdownOpenChange,
@@ -77,16 +117,40 @@ export function WorktreeTab({
   onCreateBranch,
   onPull,
   onPush,
+  onPushNewBranch,
   onOpenInEditor,
+  onOpenInIntegratedTerminal,
+  onOpenInExternalTerminal,
+  onViewChanges,
+  onDiscardChanges,
   onCommit,
   onCreatePR,
   onAddressPRComments,
   onResolveConflicts,
+  onMerge,
   onDeleteWorktree,
   onStartDevServer,
   onStopDevServer,
   onOpenDevServerUrl,
+  onViewDevServerLogs,
+  onRunInitScript,
+  onToggleAutoMode,
+  onStartTests,
+  onStopTests,
+  onViewTestLogs,
+  hasInitScript,
+  hasTestCommand = false,
 }: WorktreeTabProps) {
+  // Make the worktree tab a drop target for feature cards
+  const { setNodeRef, isOver } = useDroppable({
+    id: `worktree-drop-${worktree.branch}`,
+    data: {
+      type: 'worktree',
+      branch: worktree.branch,
+      path: worktree.path,
+      isMain: worktree.isMain,
+    },
+  });
   let prBadge: JSX.Element | null = null;
   if (worktree.pr) {
     const prState = worktree.pr.state?.toLowerCase() ?? 'open';
@@ -173,7 +237,13 @@ export function WorktreeTab({
   }
 
   return (
-    <div className="flex items-center rounded-md">
+    <div
+      ref={setNodeRef}
+      className={cn(
+        'flex items-center rounded-md transition-all duration-150',
+        isOver && 'ring-2 ring-primary ring-offset-2 ring-offset-background scale-105'
+      )}
+    >
       {worktree.isMain ? (
         <>
           <Button
@@ -190,8 +260,10 @@ export function WorktreeTab({
             aria-label={worktree.branch}
             data-testid={`worktree-branch-${worktree.branch}`}
           >
-            {isRunning && <Loader2 className="w-3 h-3 animate-spin" />}
-            {isActivating && !isRunning && <RefreshCw className="w-3 h-3 animate-spin" />}
+            {isRunning && <Spinner size="xs" variant={isSelected ? 'foreground' : 'primary'} />}
+            {isActivating && !isRunning && (
+              <Spinner size="xs" variant={isSelected ? 'foreground' : 'primary'} />
+            )}
             {worktree.branch}
             {cardCount !== undefined && cardCount > 0 && (
               <span className="inline-flex items-center justify-center h-4 min-w-[1rem] px-1 text-[10px] font-medium rounded bg-background/80 text-foreground border border-border">
@@ -199,29 +271,27 @@ export function WorktreeTab({
               </span>
             )}
             {hasChanges && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span
-                      className={cn(
-                        'inline-flex items-center justify-center h-4 min-w-[1rem] px-1 text-[10px] font-medium rounded border',
-                        isSelected
-                          ? 'bg-amber-500 text-amber-950 border-amber-400'
-                          : 'bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30'
-                      )}
-                    >
-                      <CircleDot className="w-2.5 h-2.5 mr-0.5" />
-                      {changedFilesCount ?? '!'}
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    <p>
-                      {changedFilesCount ?? 'Some'} uncommitted file
-                      {changedFilesCount !== 1 ? 's' : ''}
-                    </p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span
+                    className={cn(
+                      'inline-flex items-center justify-center h-4 min-w-[1rem] px-1 text-[10px] font-medium rounded border',
+                      isSelected
+                        ? 'bg-amber-500 text-amber-950 border-amber-400'
+                        : 'bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30'
+                    )}
+                  >
+                    <CircleDot className="w-2.5 h-2.5 mr-0.5" />
+                    {changedFilesCount ?? '!'}
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>
+                    {changedFilesCount ?? 'Some'} uncommitted file
+                    {changedFilesCount !== 1 ? 's' : ''}
+                  </p>
+                </TooltipContent>
+              </Tooltip>
             )}
             {prBadge}
           </Button>
@@ -257,8 +327,10 @@ export function WorktreeTab({
               : 'Click to switch to this branch'
           }
         >
-          {isRunning && <Loader2 className="w-3 h-3 animate-spin" />}
-          {isActivating && !isRunning && <RefreshCw className="w-3 h-3 animate-spin" />}
+          {isRunning && <Spinner size="xs" variant={isSelected ? 'foreground' : 'primary'} />}
+          {isActivating && !isRunning && (
+            <Spinner size="xs" variant={isSelected ? 'foreground' : 'primary'} />
+          )}
           {worktree.branch}
           {cardCount !== undefined && cardCount > 0 && (
             <span className="inline-flex items-center justify-center h-4 min-w-[1rem] px-1 text-[10px] font-medium rounded bg-background/80 text-foreground border border-border">
@@ -266,75 +338,116 @@ export function WorktreeTab({
             </span>
           )}
           {hasChanges && (
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span
-                    className={cn(
-                      'inline-flex items-center justify-center h-4 min-w-[1rem] px-1 text-[10px] font-medium rounded border',
-                      isSelected
-                        ? 'bg-amber-500 text-amber-950 border-amber-400'
-                        : 'bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30'
-                    )}
-                  >
-                    <CircleDot className="w-2.5 h-2.5 mr-0.5" />
-                    {changedFilesCount ?? '!'}
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent>
-                  <p>
-                    {changedFilesCount ?? 'Some'} uncommitted file
-                    {changedFilesCount !== 1 ? 's' : ''}
-                  </p>
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span
+                  className={cn(
+                    'inline-flex items-center justify-center h-4 min-w-[1rem] px-1 text-[10px] font-medium rounded border',
+                    isSelected
+                      ? 'bg-amber-500 text-amber-950 border-amber-400'
+                      : 'bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30'
+                  )}
+                >
+                  <CircleDot className="w-2.5 h-2.5 mr-0.5" />
+                  {changedFilesCount ?? '!'}
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>
+                  {changedFilesCount ?? 'Some'} uncommitted file
+                  {changedFilesCount !== 1 ? 's' : ''}
+                </p>
+              </TooltipContent>
+            </Tooltip>
           )}
           {prBadge}
         </Button>
       )}
 
       {isDevServerRunning && (
-        <Button
-          variant={isSelected ? 'default' : 'outline'}
-          size="sm"
-          className={cn(
-            'h-7 w-7 p-0 rounded-none border-r-0',
-            isSelected && 'bg-primary text-primary-foreground',
-            !isSelected && 'bg-secondary/50 hover:bg-secondary',
-            'text-green-500'
-          )}
-          onClick={() => onOpenDevServerUrl(worktree)}
-          title={`Open dev server (port ${devServerInfo?.port})`}
-        >
-          <Globe className="w-3 h-3" />
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant={isSelected ? 'default' : 'outline'}
+              size="sm"
+              className={cn(
+                'h-7 w-7 p-0 rounded-none border-r-0',
+                isSelected && 'bg-primary text-primary-foreground',
+                !isSelected && 'bg-secondary/50 hover:bg-secondary',
+                'text-green-500'
+              )}
+              onClick={() => onOpenDevServerUrl(worktree)}
+              aria-label={`Open dev server on port ${devServerInfo?.port} in browser`}
+            >
+              <Globe className="w-3 h-3" aria-hidden="true" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>
+            <p>Open dev server (:{devServerInfo?.port})</p>
+          </TooltipContent>
+        </Tooltip>
+      )}
+
+      {isAutoModeRunning && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span
+              className={cn(
+                'flex items-center justify-center h-7 px-1.5 rounded-none border-r-0',
+                isSelected ? 'bg-primary text-primary-foreground' : 'bg-secondary/50'
+              )}
+            >
+              <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>
+            <p>Auto Mode Running</p>
+          </TooltipContent>
+        </Tooltip>
       )}
 
       <WorktreeActionsDropdown
         worktree={worktree}
         isSelected={isSelected}
-        defaultEditorName={defaultEditorName}
         aheadCount={aheadCount}
         behindCount={behindCount}
+        hasRemoteBranch={hasRemoteBranch}
         isPulling={isPulling}
         isPushing={isPushing}
         isStartingDevServer={isStartingDevServer}
         isDevServerRunning={isDevServerRunning}
         devServerInfo={devServerInfo}
         gitRepoStatus={gitRepoStatus}
+        isAutoModeRunning={isAutoModeRunning}
+        hasTestCommand={hasTestCommand}
+        isStartingTests={isStartingTests}
+        isTestRunning={isTestRunning}
+        testSessionInfo={testSessionInfo}
         onOpenChange={onActionsDropdownOpenChange}
         onPull={onPull}
         onPush={onPush}
+        onPushNewBranch={onPushNewBranch}
         onOpenInEditor={onOpenInEditor}
+        onOpenInIntegratedTerminal={onOpenInIntegratedTerminal}
+        onOpenInExternalTerminal={onOpenInExternalTerminal}
+        onViewChanges={onViewChanges}
+        onDiscardChanges={onDiscardChanges}
         onCommit={onCommit}
         onCreatePR={onCreatePR}
         onAddressPRComments={onAddressPRComments}
         onResolveConflicts={onResolveConflicts}
+        onMerge={onMerge}
         onDeleteWorktree={onDeleteWorktree}
         onStartDevServer={onStartDevServer}
         onStopDevServer={onStopDevServer}
         onOpenDevServerUrl={onOpenDevServerUrl}
+        onViewDevServerLogs={onViewDevServerLogs}
+        onRunInitScript={onRunInitScript}
+        onToggleAutoMode={onToggleAutoMode}
+        onStartTests={onStartTests}
+        onStopTests={onStopTests}
+        onViewTestLogs={onViewTestLogs}
+        hasInitScript={hasInitScript}
       />
     </div>
   );

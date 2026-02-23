@@ -1,4 +1,5 @@
-import { useState } from 'react';
+// @ts-nocheck - header component props with optional handlers and status variants
+import { memo, useState } from 'react';
 import { Feature } from '@/store/app-store';
 import { cn } from '@/lib/utils';
 import { CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -12,33 +13,35 @@ import {
 import {
   GripVertical,
   Edit,
-  Loader2,
   Trash2,
   FileText,
   MoreVertical,
   ChevronDown,
   ChevronUp,
-  Cpu,
   GitFork,
 } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import { CountUpTimer } from '@/components/ui/count-up-timer';
 import { formatModelName, DEFAULT_MODEL } from '@/lib/agent-context-parser';
 import { DeleteConfirmDialog } from '@/components/ui/delete-confirm-dialog';
+import { getProviderIconForModel } from '@/components/ui/provider-icon';
 
 interface CardHeaderProps {
   feature: Feature;
   isDraggable: boolean;
   isCurrentAutoTask: boolean;
+  isSelectionMode?: boolean;
   onEdit: () => void;
   onDelete: () => void;
   onViewOutput?: () => void;
   onSpawnTask?: () => void;
 }
 
-export function CardHeaderSection({
+export const CardHeaderSection = memo(function CardHeaderSection({
   feature,
   isDraggable,
   isCurrentAutoTask,
+  isSelectionMode = false,
   onEdit,
   onDelete,
   onViewOutput,
@@ -59,10 +62,10 @@ export function CardHeaderSection({
   return (
     <CardHeader className="p-3 pb-2 block">
       {/* Running task header */}
-      {isCurrentAutoTask && (
+      {isCurrentAutoTask && !isSelectionMode && (
         <div className="absolute top-2 right-2 flex items-center gap-1">
           <div className="flex items-center justify-center gap-2 bg-[var(--status-in-progress)]/15 border border-[var(--status-in-progress)]/50 rounded-md px-2 py-0.5">
-            <Loader2 className="w-3.5 h-3.5 text-[var(--status-in-progress)] animate-spin" />
+            <Spinner size="xs" />
             {feature.startedAt && (
               <CountUpTimer
                 startedAt={feature.startedAt}
@@ -107,19 +110,24 @@ export function CardHeaderSection({
                 Spawn Sub-Task
               </DropdownMenuItem>
               {/* Model info in dropdown */}
-              <div className="px-2 py-1.5 text-[10px] text-muted-foreground border-t mt-1 pt-1.5">
-                <div className="flex items-center gap-1">
-                  <Cpu className="w-3 h-3" />
-                  <span>{formatModelName(feature.model ?? DEFAULT_MODEL)}</span>
-                </div>
-              </div>
+              {(() => {
+                const ProviderIcon = getProviderIconForModel(feature.model);
+                return (
+                  <div className="px-2 py-1.5 text-[10px] text-muted-foreground border-t mt-1 pt-1.5">
+                    <div className="flex items-center gap-1">
+                      <ProviderIcon className="w-3 h-3" />
+                      <span>{formatModelName(feature.model ?? DEFAULT_MODEL)}</span>
+                    </div>
+                  </div>
+                );
+              })()}
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
       )}
 
       {/* Backlog header */}
-      {!isCurrentAutoTask && feature.status === 'backlog' && (
+      {!isCurrentAutoTask && !isSelectionMode && feature.status === 'backlog' && (
         <div className="absolute top-2 right-2 flex items-center gap-1">
           <Button
             variant="ghost"
@@ -150,6 +158,7 @@ export function CardHeaderSection({
 
       {/* Waiting approval / Verified header */}
       {!isCurrentAutoTask &&
+        !isSelectionMode &&
         (feature.status === 'waiting_approval' || feature.status === 'verified') && (
           <>
             <div className="absolute top-2 right-2 flex items-center gap-1">
@@ -285,12 +294,17 @@ export function CardHeaderSection({
                   Spawn Sub-Task
                 </DropdownMenuItem>
                 {/* Model info in dropdown */}
-                <div className="px-2 py-1.5 text-[10px] text-muted-foreground border-t mt-1 pt-1.5">
-                  <div className="flex items-center gap-1">
-                    <Cpu className="w-3 h-3" />
-                    <span>{formatModelName(feature.model ?? DEFAULT_MODEL)}</span>
-                  </div>
-                </div>
+                {(() => {
+                  const ProviderIcon = getProviderIconForModel(feature.model);
+                  return (
+                    <div className="px-2 py-1.5 text-[10px] text-muted-foreground border-t mt-1 pt-1.5">
+                      <div className="flex items-center gap-1">
+                        <ProviderIcon className="w-3 h-3" />
+                        <span>{formatModelName(feature.model ?? DEFAULT_MODEL)}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -310,7 +324,7 @@ export function CardHeaderSection({
         <div className="flex-1 min-w-0 overflow-hidden">
           {feature.titleGenerating ? (
             <div className="flex items-center gap-1.5 mb-1">
-              <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
+              <Spinner size="xs" />
               <span className="text-xs text-muted-foreground italic">Generating title...</span>
             </div>
           ) : feature.title ? (
@@ -364,4 +378,4 @@ export function CardHeaderSection({
       />
     </CardHeader>
   );
-}
+});

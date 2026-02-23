@@ -1,6 +1,10 @@
 import React, { useState, useRef, useCallback } from 'react';
+import { createLogger } from '@automaker/utils/logger';
 import { cn } from '@/lib/utils';
-import { ImageIcon, X, Upload } from 'lucide-react';
+
+const logger = createLogger('ImageDropZone');
+import { ImageIcon, X } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import type { ImageAttachment } from '@/store/app-store';
 import {
   fileToBase64,
@@ -88,7 +92,7 @@ export function ImageDropZone({
       }
 
       if (errors.length > 0) {
-        console.warn('Image upload errors:', errors);
+        logger.warn('Image upload errors:', errors);
       }
 
       if (newImages.length > 0) {
@@ -201,7 +205,7 @@ export function ImageDropZone({
               )}
             >
               {isProcessing ? (
-                <Upload className="h-6 w-6 animate-spin text-muted-foreground" />
+                <Spinner size="lg" />
               ) : (
                 <ImageIcon className="h-6 w-6 text-muted-foreground" />
               )}

@@ -1,25 +1,24 @@
 import { useAppStore } from '@/store/app-store';
 import { useSetupStore } from '@/store/setup-store';
 import { Button } from '@/components/ui/button';
-import { Key, CheckCircle2, Settings, Trash2, Loader2 } from 'lucide-react';
+import { Key, CheckCircle2, Trash2, Info } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import { ApiKeyField } from './api-key-field';
 import { buildProviderConfigs } from '@/config/api-providers';
-import { AuthenticationStatusDisplay } from './authentication-status-display';
 import { SecurityNotice } from './security-notice';
 import { useApiKeyManagement } from './hooks/use-api-key-management';
 import { cn } from '@/lib/utils';
 import { useState, useCallback } from 'react';
 import { getElectronAPI } from '@/lib/electron';
 import { toast } from 'sonner';
-import { useNavigate } from '@tanstack/react-router';
 
 export function ApiKeysSection() {
   const { apiKeys, setApiKeys } = useAppStore();
-  const { claudeAuthStatus, setClaudeAuthStatus, setSetupComplete } = useSetupStore();
+  const { claudeAuthStatus, setClaudeAuthStatus, setCodexAuthStatus } = useSetupStore();
   const [isDeletingAnthropicKey, setIsDeletingAnthropicKey] = useState(false);
-  const navigate = useNavigate();
+  const [isDeletingOpenaiKey, setIsDeletingOpenaiKey] = useState(false);
 
-  const { providerConfigParams, apiKeyStatus, handleSave, saved } = useApiKeyManagement();
+  const { providerConfigParams, handleSave, saved } = useApiKeyManagement();
 
   const providerConfigs = buildProviderConfigs(providerConfigParams);
 
@@ -45,18 +44,40 @@ export function ApiKeysSection() {
       } else {
         toast.error(result.error || 'Failed to delete API key');
       }
-    } catch (error) {
+    } catch {
       toast.error('Failed to delete API key');
     } finally {
       setIsDeletingAnthropicKey(false);
     }
   }, [apiKeys, setApiKeys, claudeAuthStatus, setClaudeAuthStatus]);
 
-  // Open setup wizard
-  const openSetupWizard = useCallback(() => {
-    setSetupComplete(false);
-    navigate({ to: '/setup' });
-  }, [setSetupComplete, navigate]);
+  // Delete OpenAI API key
+  const deleteOpenaiKey = useCallback(async () => {
+    setIsDeletingOpenaiKey(true);
+    try {
+      const api = getElectronAPI();
+      if (!api.setup?.deleteApiKey) {
+        toast.error('Delete API not available');
+        return;
+      }
+
+      const result = await api.setup.deleteApiKey('openai');
+      if (result.success) {
+        setApiKeys({ ...apiKeys, openai: '' });
+        setCodexAuthStatus({
+          authenticated: false,
+          method: 'none',
+        });
+        toast.success('OpenAI API key deleted');
+      } else {
+        toast.error(result.error || 'Failed to delete API key');
+      }
+    } catch {
+      toast.error('Failed to delete API key');
+    } finally {
+      setIsDeletingOpenaiKey(false);
+    }
+  }, [apiKeys, setApiKeys, setCodexAuthStatus]);
 
   return (
     <div
@@ -79,17 +100,38 @@ export function ApiKeysSection() {
         </p>
       </div>
       <div className="p-6 space-y-6">
-        {/* API Key Fields */}
+        {/* API Key Fields with contextual info */}
         {providerConfigs.map((provider) => (
-          <ApiKeyField key={provider.key} config={provider} />
+          <div key={provider.key}>
+            <ApiKeyField config={provider} />
+            {/* Anthropic-specific provider info */}
+            {provider.key === 'anthropic' && (
+              <div className="mt-3 p-3 rounded-lg bg-blue-500/5 border border-blue-500/20">
+                <div className="flex gap-2">
+                  <Info className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" />
+                  <div className="text-xs text-muted-foreground space-y-1">
+                    <p>
+                      <span className="font-medium text-foreground/80">
+                        Using Claude Compatible Providers?
+                      </span>{' '}
+                      Add a provider in <span className="text-blue-500">AI Providers → Claude</span>{' '}
+                      with{' '}
+                      <span className="font-mono text-[10px] bg-muted/50 px-1 rounded">
+                        credentials
+                      </span>{' '}
+                      as the API key source to use this key.
+                    </p>
+                    <p>
+                      For alternative providers (z.AI GLM, MiniMax, OpenRouter), add a provider with{' '}
+                      <span className="font-mono text-[10px] bg-muted/50 px-1 rounded">inline</span>{' '}
+                      key source and enter the provider's API key directly.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
         ))}
-
-        {/* Authentication Status Display */}
-        <AuthenticationStatusDisplay
-          claudeAuthStatus={claudeAuthStatus}
-          apiKeyStatus={apiKeyStatus}
-          apiKeys={apiKeys}
-        />
 
         {/* Security Notice */}
         <SecurityNotice />
@@ -119,16 +161,6 @@ export function ApiKeysSection() {
             )}
           </Button>
 
-          <Button
-            onClick={openSetupWizard}
-            variant="outline"
-            className="h-10 border-border"
-            data-testid="run-setup-wizard"
-          >
-            <Settings className="w-4 h-4 mr-2" />
-            Run Setup Wizard
-          </Button>
-
           {apiKeys.anthropic && (
             <Button
               onClick={deleteAnthropicKey}
@@ -138,11 +170,28 @@ export function ApiKeysSection() {
               data-testid="delete-anthropic-key"
             >
               {isDeletingAnthropicKey ? (
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                <Spinner size="sm" className="mr-2" />
               ) : (
                 <Trash2 className="w-4 h-4 mr-2" />
               )}
               Delete Anthropic Key
+            </Button>
+          )}
+
+          {apiKeys.openai && (
+            <Button
+              onClick={deleteOpenaiKey}
+              disabled={isDeletingOpenaiKey}
+              variant="outline"
+              className="h-10 border-red-500/30 text-red-500 hover:bg-red-500/10 hover:border-red-500/50"
+              data-testid="delete-openai-key"
+            >
+              {isDeletingOpenaiKey ? (
+                <Spinner size="sm" className="mr-2" />
+              ) : (
+                <Trash2 className="w-4 h-4 mr-2" />
+              )}
+              Delete OpenAI Key
             </Button>
           )}
         </div>

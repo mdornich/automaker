@@ -28,6 +28,7 @@
   - [Quick Start](#quick-start)
 - [How to Run](#how-to-run)
   - [Development Mode](#development-mode)
+  - [Interactive TUI Launcher](#interactive-tui-launcher-recommended-for-new-users)
   - [Building for Production](#building-for-production)
   - [Testing](#testing)
   - [Linting](#linting)
@@ -101,11 +102,9 @@ In the Discord, you can:
 
 ### Prerequisites
 
-- **Node.js 18+** (tested with Node.js 22)
+- **Node.js 22+** (required: >=22.0.0 <23.0.0)
 - **npm** (comes with Node.js)
-- **Authentication** (choose one):
-  - **[Claude Code CLI](https://code.claude.com/docs/en/overview)** (recommended) - Install and authenticate, credentials used automatically
-  - **Anthropic API Key** - Direct API key for Claude Agent SDK ([get one here](https://console.anthropic.com/))
+- **[Claude Code CLI](https://code.claude.com/docs/en/overview)** - Install and authenticate with your Anthropic subscription. Automaker integrates with your authenticated Claude Code CLI to access Claude models.
 
 ### Quick Start
 
@@ -117,32 +116,16 @@ cd automaker
 # 2. Install dependencies
 npm install
 
-# 3. Build shared packages (Now can be skipped npm install / run dev does it automaticly)
-npm run build:packages
-
-# 4. Set up authentication (skip if using Claude Code CLI)
-# If using Claude Code CLI: credentials are detected automatically
-# If using API key directly, choose one method:
-
-# Option A: Environment variable
-export ANTHROPIC_API_KEY="sk-ant-..."
-
-# Option B: Create .env file in project root
-echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
-
-# 5. Start Automaker (interactive launcher)
+# 3. Start Automaker
 npm run dev
 # Choose between:
 #   1. Web Application (browser at localhost:3007)
 #   2. Desktop Application (Electron - recommended)
 ```
 
-**Note:** The `npm run dev` command will:
+**Authentication:** Automaker integrates with your authenticated Claude Code CLI. Make sure you have [installed and authenticated](https://code.claude.com/docs/en/quickstart) the Claude Code CLI before running Automaker. Your CLI credentials will be detected automatically.
 
-- Check for dependencies and install if needed
-- Install Playwright browsers for E2E tests
-- Kill any processes on ports 3007/3008
-- Present an interactive menu to choose your run mode
+**For Development:** `npm run dev` starts the development server with Vite live reload and hot module replacement for fast refresh and instant updates as you make changes.
 
 ## How to Run
 
@@ -179,6 +162,40 @@ npm run dev:electron:wsl:gpu
 npm run dev:web
 ```
 
+### Interactive TUI Launcher (Recommended for New Users)
+
+For a user-friendly interactive menu, use the built-in TUI launcher script:
+
+```bash
+# Show interactive menu with all launch options
+./start-automaker.sh
+
+# Or launch directly without menu
+./start-automaker.sh web          # Web browser
+./start-automaker.sh electron     # Desktop app
+./start-automaker.sh electron-debug  # Desktop + DevTools
+
+# Additional options
+./start-automaker.sh --help       # Show all available options
+./start-automaker.sh --version    # Show version information
+./start-automaker.sh --check-deps # Verify project dependencies
+./start-automaker.sh --no-colors  # Disable colored output
+./start-automaker.sh --no-history # Don't remember last choice
+```
+
+**Features:**
+
+- 🎨 Beautiful terminal UI with gradient colors and ASCII art
+- ⌨️ Interactive menu (press 1-3 to select, Q to exit)
+- 💾 Remembers your last choice
+- ✅ Pre-flight checks (validates Node.js, npm, dependencies)
+- 📏 Responsive layout (adapts to terminal size)
+- ⏱️ 30-second timeout for hands-free selection
+- 🌐 Cross-shell compatible (bash/zsh)
+
+**History File:**
+Your last selected mode is saved in `~/.automaker_launcher_history` for quick re-runs.
+
 ### Building for Production
 
 #### Web Application
@@ -186,9 +203,6 @@ npm run dev:web
 ```bash
 # Build for web deployment (uses Vite)
 npm run build
-
-# Run production build
-npm run start
 ```
 
 #### Desktop Application
@@ -200,9 +214,28 @@ npm run build:electron
 # Platform-specific builds
 npm run build:electron:mac     # macOS (DMG + ZIP, x64 + arm64)
 npm run build:electron:win     # Windows (NSIS installer, x64)
-npm run build:electron:linux   # Linux (AppImage + DEB, x64)
+npm run build:electron:linux   # Linux (AppImage + DEB + RPM, x64)
 
 # Output directory: apps/ui/release/
+```
+
+**Linux Distribution Packages:**
+
+- **AppImage**: Universal format, works on any Linux distribution
+- **DEB**: Ubuntu, Debian, Linux Mint, Pop!\_OS
+- **RPM**: Fedora, RHEL, Rocky Linux, AlmaLinux, openSUSE
+
+**Installing on Fedora/RHEL:**
+
+```bash
+# Download the RPM package
+wget https://github.com/AutoMaker-Org/automaker/releases/latest/download/Automaker-<version>-x86_64.rpm
+
+# Install with dnf (Fedora)
+sudo dnf install ./Automaker-<version>-x86_64.rpm
+
+# Or with yum (RHEL/CentOS)
+sudo yum localinstall ./Automaker-<version>-x86_64.rpm
 ```
 
 #### Docker Deployment
@@ -223,16 +256,9 @@ docker-compose logs -f
 docker-compose down
 ```
 
-##### Configuration
+##### Authentication
 
-Create a `.env` file in the project root if using API key authentication:
-
-```bash
-# Optional: Anthropic API key (not needed if using Claude CLI authentication)
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-**Note:** Most users authenticate via Claude CLI instead of API keys. See [Claude CLI Authentication](#claude-cli-authentication-optional) below.
+Automaker integrates with your authenticated Claude Code CLI. To use CLI authentication in Docker, mount your Claude CLI config directory (see [Claude CLI Authentication](#claude-cli-authentication) below).
 
 ##### Working with Projects (Host Directory Access)
 
@@ -246,9 +272,9 @@ services:
       - /path/to/your/project:/projects/your-project
 ```
 
-##### Claude CLI Authentication (Optional)
+##### Claude CLI Authentication
 
-To use Claude Code CLI authentication instead of an API key, mount your Claude CLI config directory:
+Mount your Claude CLI config directory to use your authenticated CLI credentials:
 
 ```yaml
 services:
@@ -261,6 +287,31 @@ services:
 ```
 
 **Note:** The Claude CLI config must be writable (do not use `:ro` flag) as the CLI writes debug files.
+
+> **⚠️ Important: Linux/WSL Users**
+>
+> The container runs as UID 1001 by default. If your host user has a different UID (common on Linux/WSL where the first user is UID 1000), you must create a `.env` file to match your host user:
+>
+> ```bash
+> # Check your UID/GID
+> id -u  # outputs your UID (e.g., 1000)
+> id -g  # outputs your GID (e.g., 1000)
+> ```
+>
+> Create a `.env` file in the automaker directory:
+>
+> ```
+> UID=1000
+> GID=1000
+> ```
+>
+> Then rebuild the images:
+>
+> ```bash
+> docker compose build
+> ```
+>
+> Without this, files written by the container will be inaccessible to your host user.
 
 ##### GitHub CLI Authentication (For Git Push/PR Operations)
 
@@ -346,10 +397,6 @@ npm run lint
 
 ### Environment Configuration
 
-#### Authentication (if not using Claude Code CLI)
-
-- `ANTHROPIC_API_KEY` - Your Anthropic API key for Claude Agent SDK (not needed if using Claude Code CLI)
-
 #### Optional - Server
 
 - `PORT` - Server port (default: 3008)
@@ -360,48 +407,22 @@ npm run lint
 
 - `AUTOMAKER_API_KEY` - Optional API authentication for the server
 - `ALLOWED_ROOT_DIRECTORY` - Restrict file operations to specific directory
-- `CORS_ORIGIN` - CORS policy (default: \*)
+- `CORS_ORIGIN` - CORS allowed origins (comma-separated list; defaults to localhost only)
 
 #### Optional - Development
 
 - `VITE_SKIP_ELECTRON` - Skip Electron in dev mode
 - `OPEN_DEVTOOLS` - Auto-open DevTools in Electron
+- `AUTOMAKER_SKIP_SANDBOX_WARNING` - Skip sandbox warning dialog (useful for dev/CI)
+- `AUTOMAKER_AUTO_LOGIN=true` - Skip login prompt in development (ignored when NODE_ENV=production)
 
 ### Authentication Setup
 
-#### Option 1: Claude Code CLI (Recommended)
+Automaker integrates with your authenticated Claude Code CLI and uses your Anthropic subscription.
 
 Install and authenticate the Claude Code CLI following the [official quickstart guide](https://code.claude.com/docs/en/quickstart).
 
 Once authenticated, Automaker will automatically detect and use your CLI credentials. No additional configuration needed!
-
-#### Option 2: Direct API Key
-
-If you prefer not to use the CLI, you can provide an Anthropic API key directly using one of these methods:
-
-##### 2a. Shell Configuration
-
-Add to your `~/.bashrc` or `~/.zshrc`:
-
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-```
-
-Then restart your terminal or run `source ~/.bashrc` (or `source ~/.zshrc`).
-
-##### 2b. .env File
-
-Create a `.env` file in the project root (gitignored):
-
-```bash
-ANTHROPIC_API_KEY=sk-ant-...
-PORT=3008
-DATA_DIR=./data
-```
-
-##### 2c. In-App Storage
-
-The application can store your API key securely in the settings UI. The key is persisted in the `DATA_DIR` directory.
 
 ## Features
 
@@ -511,20 +532,24 @@ Automaker provides several specialized views accessible via the sidebar or keybo
 | **Agent**          | `A`      | Interactive chat sessions with AI agents for exploratory work and questions                      |
 | **Spec**           | `D`      | Project specification editor with AI-powered generation and feature suggestions                  |
 | **Context**        | `C`      | Manage context files (markdown, images) that AI agents automatically reference                   |
-| **Profiles**       | `M`      | Create and manage AI agent profiles with custom prompts and configurations                       |
 | **Settings**       | `S`      | Configure themes, shortcuts, defaults, authentication, and more                                  |
 | **Terminal**       | `T`      | Integrated terminal with tabs, splits, and persistent sessions                                   |
-| **GitHub Issues**  | -        | Import and validate GitHub issues, convert to tasks                                              |
+| **Graph**          | `H`      | Visualize feature dependencies with interactive graph visualization                              |
+| **Ideation**       | `I`      | Brainstorm and generate ideas with AI assistance                                                 |
+| **Memory**         | `Y`      | View and manage agent memory and conversation history                                            |
+| **GitHub Issues**  | `G`      | Import and validate GitHub issues, convert to tasks                                              |
+| **GitHub PRs**     | `R`      | View and manage GitHub pull requests                                                             |
 | **Running Agents** | -        | View all active agents across projects with status and progress                                  |
 
 ### Keyboard Navigation
 
 All shortcuts are customizable in Settings. Default shortcuts:
 
-- **Navigation:** `K` (Board), `A` (Agent), `D` (Spec), `C` (Context), `S` (Settings), `M` (Profiles), `T` (Terminal)
+- **Navigation:** `K` (Board), `A` (Agent), `D` (Spec), `C` (Context), `S` (Settings), `T` (Terminal), `H` (Graph), `I` (Ideation), `Y` (Memory), `G` (GitHub Issues), `R` (GitHub PRs)
 - **UI:** `` ` `` (Toggle sidebar)
-- **Actions:** `N` (New item in current view), `G` (Start next features), `O` (Open project), `P` (Project picker)
+- **Actions:** `N` (New item in current view), `O` (Open project), `P` (Project picker)
 - **Projects:** `Q`/`E` (Cycle previous/next project)
+- **Terminal:** `Alt+D` (Split right), `Alt+S` (Split down), `Alt+W` (Close), `Alt+T` (New tab)
 
 ## Architecture
 
@@ -589,10 +614,16 @@ Stored in `{projectPath}/.automaker/`:
 │       ├── agent-output.md # AI agent output log
 │       └── images/        # Attached images
 ├── context/               # Context files for AI agents
+├── worktrees/             # Git worktree metadata
+├── validations/           # GitHub issue validation results
+├── ideation/              # Brainstorming and analysis data
+│   └── analysis.json      # Project structure analysis
+├── board/                 # Board-related data
+├── images/                # Project-level images
 ├── settings.json          # Project-specific settings
-├── spec.md               # Project specification
-├── analysis.json         # Project structure analysis
-└── feature-suggestions.json # AI-generated suggestions
+├── app_spec.txt           # Project specification (XML format)
+├── active-branches.json   # Active git branches tracking
+└── execution-state.json   # Auto-mode execution state
 ```
 
 #### Global Data
@@ -630,7 +661,6 @@ data/
 
 - [Contributing Guide](./CONTRIBUTING.md) - How to contribute to Automaker
 - [Project Documentation](./docs/) - Architecture guides, patterns, and developer docs
-- [Docker Isolation Guide](./docs/docker-isolation.md) - Security-focused Docker deployment
 - [Shared Packages Guide](./docs/llm-shared-packages.md) - Using monorepo packages
 
 ### Community
@@ -639,26 +669,10 @@ Join the **Agentic Jumpstart** Discord to connect with other builders exploring 
 
 👉 [Agentic Jumpstart Discord](https://discord.gg/jjem7aEDKU)
 
+## Project Status
+
+**This project is no longer actively maintained.** The codebase is provided as-is for those who wish to use, study, or fork it. No bug fixes, security updates, or new features are being developed. Community contributions may still be accepted, but there is no guarantee of review or merge.
+
 ## License
 
-This project is licensed under the **Automaker License Agreement**. See [LICENSE](LICENSE) for the full text.
-
-**Summary of Terms:**
-
-- **Allowed:**
-  - **Build Anything:** You can clone and use Automaker locally or in your organization to build ANY product (commercial or free).
-  - **Internal Use:** You can use it internally within your company (commercial or non-profit) without restriction.
-  - **Modify:** You can modify the code for internal use within your organization (commercial or non-profit).
-
-- **Restricted (The "No Monetization of the Tool" Rule):**
-  - **No Resale:** You cannot resell Automaker itself.
-  - **No SaaS:** You cannot host Automaker as a service for others.
-  - **No Monetizing Mods:** You cannot distribute modified versions of Automaker for money.
-
-- **Liability:**
-  - **Use at Own Risk:** This tool uses AI. We are **NOT** responsible if it breaks your computer, deletes your files, or generates bad code. You assume all risk.
-
-- **Contributing:**
-  - By contributing to this repository, you grant the Core Contributors full, irrevocable rights to your code (copyright assignment).
-
-**Core Contributors** (Cody Seibert (webdevcody), SuperComboGamer (SCG), Kacper Lachowicz (Shironex, Shirone), and Ben Scott (trueheads)) are granted perpetual, royalty-free licenses for any use, including monetization.
+This project is licensed under the **MIT License**. See [LICENSE](LICENSE) for the full text.

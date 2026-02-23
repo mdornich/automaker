@@ -26,12 +26,30 @@ export function createRunFeatureHandler(autoModeService: AutoModeService) {
         return;
       }
 
+      // Check per-worktree capacity before starting
+      const capacity = await autoModeService.checkWorktreeCapacity(projectPath, featureId);
+      if (!capacity.hasCapacity) {
+        const worktreeDesc = capacity.branchName
+          ? `worktree "${capacity.branchName}"`
+          : 'main worktree';
+        res.status(429).json({
+          success: false,
+          error: `Agent limit reached for ${worktreeDesc} (${capacity.currentAgents}/${capacity.maxAgents}). Wait for running tasks to complete or increase the limit.`,
+          details: {
+            currentAgents: capacity.currentAgents,
+            maxAgents: capacity.maxAgents,
+            branchName: capacity.branchName,
+          },
+        });
+        return;
+      }
+
       // Start execution in background
       // executeFeature derives workDir from feature.branchName
       autoModeService
         .executeFeature(projectPath, featureId, useWorktrees ?? false, false)
         .catch((error) => {
-          logger.error(`[AutoMode] Feature ${featureId} error:`, error);
+          logger.error(`Feature ${featureId} error:`, error);
         })
         .finally(() => {
           // Release the starting slot when execution completes (success or error)

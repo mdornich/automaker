@@ -1,133 +1,135 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useSearch } from '@tanstack/react-router';
 import { useAppStore } from '@/store/app-store';
-import { useSetupStore } from '@/store/setup-store';
 
-import { useCliStatus, useSettingsView } from './settings-view/hooks';
+import { useSettingsView, type SettingsViewId } from './settings-view/hooks';
 import { NAV_ITEMS } from './settings-view/config/navigation';
 import { SettingsHeader } from './settings-view/components/settings-header';
 import { KeyboardMapDialog } from './settings-view/components/keyboard-map-dialog';
-import { DeleteProjectDialog } from './settings-view/components/delete-project-dialog';
 import { SettingsNavigation } from './settings-view/components/settings-navigation';
 import { ApiKeysSection } from './settings-view/api-keys/api-keys-section';
-import { ClaudeUsageSection } from './settings-view/api-keys/claude-usage-section';
-import { ClaudeCliStatus } from './settings-view/cli-status/claude-cli-status';
-import { ClaudeMdSettings } from './settings-view/claude/claude-md-settings';
-import { AIEnhancementSection } from './settings-view/ai-enhancement';
+import { ModelDefaultsSection } from './settings-view/model-defaults';
 import { AppearanceSection } from './settings-view/appearance/appearance-section';
 import { TerminalSection } from './settings-view/terminal/terminal-section';
 import { AudioSection } from './settings-view/audio/audio-section';
 import { KeyboardShortcutsSection } from './settings-view/keyboard-shortcuts/keyboard-shortcuts-section';
 import { FeatureDefaultsSection } from './settings-view/feature-defaults/feature-defaults-section';
-import { DangerZoneSection } from './settings-view/danger-zone/danger-zone-section';
+import { WorktreesSection } from './settings-view/worktrees';
+import { AccountSection } from './settings-view/account';
+import { SecuritySection } from './settings-view/security';
+import { DeveloperSection } from './settings-view/developer/developer-section';
+import {
+  ClaudeSettingsTab,
+  CursorSettingsTab,
+  CodexSettingsTab,
+  OpencodeSettingsTab,
+  GeminiSettingsTab,
+  CopilotSettingsTab,
+} from './settings-view/providers';
 import { MCPServersSection } from './settings-view/mcp-servers';
 import { PromptCustomizationSection } from './settings-view/prompts';
-import type { Project as SettingsProject, Theme } from './settings-view/shared/types';
-import type { Project as ElectronProject } from '@/lib/electron';
+import { EventHooksSection } from './settings-view/event-hooks';
+import { ImportExportDialog } from './settings-view/components/import-export-dialog';
+import type { Theme } from './settings-view/shared/types';
+
+// Breakpoint constant for mobile (matches Tailwind lg breakpoint)
+const LG_BREAKPOINT = 1024;
 
 export function SettingsView() {
   const {
     theme,
     setTheme,
-    setProjectTheme,
     defaultSkipTests,
     setDefaultSkipTests,
     enableDependencyBlocking,
     setEnableDependencyBlocking,
+    skipVerificationInAutoMode,
+    setSkipVerificationInAutoMode,
+    enableAiCommitMessages,
+    setEnableAiCommitMessages,
     useWorktrees,
     setUseWorktrees,
-    showProfilesOnly,
-    setShowProfilesOnly,
     muteDoneSound,
     setMuteDoneSound,
     currentProject,
-    moveProjectToTrash,
     defaultPlanningMode,
     setDefaultPlanningMode,
     defaultRequirePlanApproval,
     setDefaultRequirePlanApproval,
-    defaultAIProfileId,
-    setDefaultAIProfileId,
-    aiProfiles,
-    apiKeys,
-    validationModel,
-    setValidationModel,
-    autoLoadClaudeMd,
-    setAutoLoadClaudeMd,
-    enableSandboxMode,
-    setEnableSandboxMode,
+    defaultFeatureModel,
+    setDefaultFeatureModel,
     promptCustomization,
     setPromptCustomization,
+    skipSandboxWarning,
+    setSkipSandboxWarning,
   } = useAppStore();
 
-  const claudeAuthStatus = useSetupStore((state) => state.claudeAuthStatus);
+  // Global theme (project-specific themes are managed in Project Settings)
+  const globalTheme = theme as Theme;
 
-  // Hide usage tracking when using API key (only show for Claude Code CLI users)
-  // Check both user-entered API key and environment variable ANTHROPIC_API_KEY
-  // Also hide on Windows for now (CLI usage command not supported)
-  // Only show if CLI has been verified/authenticated
-  const isWindows =
-    typeof navigator !== 'undefined' && navigator.platform?.toLowerCase().includes('win');
-  const hasApiKey = !!apiKeys.anthropic || !!claudeAuthStatus?.hasEnvApiKey;
-  const isCliVerified =
-    claudeAuthStatus?.authenticated && claudeAuthStatus?.method === 'cli_authenticated';
-  const showUsageTracking = !hasApiKey && !isWindows && isCliVerified;
+  // Get initial view from URL search params
+  const { view: initialView } = useSearch({ from: '/settings' });
 
-  // Convert electron Project to settings-view Project type
-  const convertProject = (project: ElectronProject | null): SettingsProject | null => {
-    if (!project) return null;
-    return {
-      id: project.id,
-      name: project.name,
-      path: project.path,
-      theme: project.theme as Theme | undefined,
-    };
-  };
+  // Use settings view navigation hook
+  const { activeView, navigateTo } = useSettingsView({ initialView });
 
-  const settingsProject = convertProject(currentProject);
-
-  // Compute the effective theme for the current project
-  const effectiveTheme = (settingsProject?.theme || theme) as Theme;
-
-  // Handler to set theme - always updates global theme (user's preference),
-  // and also sets per-project theme if a project is selected
-  const handleSetTheme = (newTheme: typeof theme) => {
-    // Always update global theme so user's preference persists across all projects
-    setTheme(newTheme);
-    // Also set per-project theme if a project is selected
-    if (currentProject) {
-      setProjectTheme(currentProject.id, newTheme);
+  // Handle navigation - if navigating to 'providers', default to 'claude-provider'
+  const handleNavigate = (viewId: SettingsViewId) => {
+    if (viewId === 'providers') {
+      navigateTo('claude-provider');
+    } else {
+      navigateTo(viewId);
     }
   };
 
-  // Use CLI status hook
-  const { claudeCliStatus, isCheckingClaudeCli, handleRefreshClaudeCli } = useCliStatus();
-
-  // Use settings view navigation hook
-  const { activeView, navigateTo } = useSettingsView();
-
-  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showKeyboardMapDialog, setShowKeyboardMapDialog] = useState(false);
+  const [showImportExportDialog, setShowImportExportDialog] = useState(false);
+
+  // Mobile navigation state - default to showing on desktop, hidden on mobile
+  const [showNavigation, setShowNavigation] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return window.innerWidth >= LG_BREAKPOINT;
+    }
+    return true; // Default to showing on SSR
+  });
+
+  // Auto-close navigation on mobile when a section is selected
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.innerWidth < LG_BREAKPOINT) {
+      setShowNavigation(false);
+    }
+  }, [activeView]);
+
+  // Handle window resize to show/hide navigation appropriately
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth >= LG_BREAKPOINT) {
+        setShowNavigation(true);
+      }
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   // Render the active section based on current view
   const renderActiveSection = () => {
     switch (activeView) {
-      case 'claude':
-        return (
-          <div className="space-y-6">
-            <ClaudeCliStatus
-              status={claudeCliStatus}
-              isChecking={isCheckingClaudeCli}
-              onRefresh={handleRefreshClaudeCli}
-            />
-            <ClaudeMdSettings
-              autoLoadClaudeMd={autoLoadClaudeMd}
-              onAutoLoadClaudeMdChange={setAutoLoadClaudeMd}
-              enableSandboxMode={enableSandboxMode}
-              onEnableSandboxModeChange={setEnableSandboxMode}
-            />
-            {showUsageTracking && <ClaudeUsageSection />}
-          </div>
-        );
+      case 'claude-provider':
+        return <ClaudeSettingsTab />;
+      case 'cursor-provider':
+        return <CursorSettingsTab />;
+      case 'codex-provider':
+        return <CodexSettingsTab />;
+      case 'opencode-provider':
+        return <OpencodeSettingsTab />;
+      case 'gemini-provider':
+        return <GeminiSettingsTab />;
+      case 'copilot-provider':
+        return <CopilotSettingsTab />;
+      case 'providers':
+      case 'claude': // Backwards compatibility - redirect to claude-provider
+        return <ClaudeSettingsTab />;
       case 'mcp-servers':
         return <MCPServersSection />;
       case 'prompts':
@@ -137,14 +139,13 @@ export function SettingsView() {
             onPromptCustomizationChange={setPromptCustomization}
           />
         );
-      case 'ai-enhancement':
-        return <AIEnhancementSection />;
+      case 'model-defaults':
+        return <ModelDefaultsSection />;
       case 'appearance':
         return (
           <AppearanceSection
-            effectiveTheme={effectiveTheme}
-            currentProject={settingsProject}
-            onThemeChange={handleSetTheme}
+            effectiveTheme={globalTheme}
+            onThemeChange={(newTheme) => setTheme(newTheme as typeof theme)}
           />
         );
       case 'terminal':
@@ -157,35 +158,42 @@ export function SettingsView() {
         return (
           <AudioSection muteDoneSound={muteDoneSound} onMuteDoneSoundChange={setMuteDoneSound} />
         );
+      case 'event-hooks':
+        return <EventHooksSection />;
       case 'defaults':
         return (
           <FeatureDefaultsSection
-            showProfilesOnly={showProfilesOnly}
             defaultSkipTests={defaultSkipTests}
             enableDependencyBlocking={enableDependencyBlocking}
-            useWorktrees={useWorktrees}
+            skipVerificationInAutoMode={skipVerificationInAutoMode}
             defaultPlanningMode={defaultPlanningMode}
             defaultRequirePlanApproval={defaultRequirePlanApproval}
-            defaultAIProfileId={defaultAIProfileId}
-            aiProfiles={aiProfiles}
-            validationModel={validationModel}
-            onShowProfilesOnlyChange={setShowProfilesOnly}
+            enableAiCommitMessages={enableAiCommitMessages}
+            defaultFeatureModel={defaultFeatureModel}
             onDefaultSkipTestsChange={setDefaultSkipTests}
             onEnableDependencyBlockingChange={setEnableDependencyBlocking}
-            onUseWorktreesChange={setUseWorktrees}
+            onSkipVerificationInAutoModeChange={setSkipVerificationInAutoMode}
             onDefaultPlanningModeChange={setDefaultPlanningMode}
             onDefaultRequirePlanApprovalChange={setDefaultRequirePlanApproval}
-            onDefaultAIProfileIdChange={setDefaultAIProfileId}
-            onValidationModelChange={setValidationModel}
+            onEnableAiCommitMessagesChange={setEnableAiCommitMessages}
+            onDefaultFeatureModelChange={setDefaultFeatureModel}
           />
         );
-      case 'danger':
+      case 'worktrees':
         return (
-          <DangerZoneSection
-            project={settingsProject}
-            onDeleteClick={() => setShowDeleteDialog(true)}
+          <WorktreesSection useWorktrees={useWorktrees} onUseWorktreesChange={setUseWorktrees} />
+        );
+      case 'account':
+        return <AccountSection />;
+      case 'security':
+        return (
+          <SecuritySection
+            skipSandboxWarning={skipSandboxWarning}
+            onSkipSandboxWarningChange={setSkipSandboxWarning}
           />
         );
+      case 'developer':
+        return <DeveloperSection />;
       default:
         return <ApiKeysSection />;
     }
@@ -194,20 +202,26 @@ export function SettingsView() {
   return (
     <div className="flex-1 flex flex-col overflow-hidden content-bg" data-testid="settings-view">
       {/* Header Section */}
-      <SettingsHeader />
+      <SettingsHeader
+        showNavigation={showNavigation}
+        onToggleNavigation={() => setShowNavigation(!showNavigation)}
+        onImportExportClick={() => setShowImportExportDialog(true)}
+      />
 
       {/* Content Area with Sidebar */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Side Navigation - No longer scrolls, just switches views */}
+        {/* Side Navigation - Overlay on mobile, sidebar on desktop */}
         <SettingsNavigation
           navItems={NAV_ITEMS}
           activeSection={activeView}
           currentProject={currentProject}
-          onNavigate={navigateTo}
+          onNavigate={handleNavigate}
+          isOpen={showNavigation}
+          onClose={() => setShowNavigation(false)}
         />
 
         {/* Content Panel - Shows only the active section */}
-        <div className="flex-1 overflow-y-auto p-8">
+        <div className="flex-1 overflow-y-auto p-4 lg:p-8">
           <div className="max-w-4xl mx-auto">{renderActiveSection()}</div>
         </div>
       </div>
@@ -215,13 +229,8 @@ export function SettingsView() {
       {/* Keyboard Map Dialog */}
       <KeyboardMapDialog open={showKeyboardMapDialog} onOpenChange={setShowKeyboardMapDialog} />
 
-      {/* Delete Project Confirmation Dialog */}
-      <DeleteProjectDialog
-        open={showDeleteDialog}
-        onOpenChange={setShowDeleteDialog}
-        project={currentProject}
-        onConfirm={moveProjectToTrash}
-      />
+      {/* Import/Export Settings Dialog */}
+      <ImportExportDialog open={showImportExportDialog} onOpenChange={setShowImportExportDialog} />
     </div>
   );
 }
